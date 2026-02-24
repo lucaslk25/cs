@@ -184,4 +184,7 @@ function movements_desert_teleportTo.onStepIn(creature, item, position, fromPosi
 end
 
 movements_desert_teleportTo:aid(4930, 4931, 4932)
+for _, tp in pairs(teleports) do
+	registerScriptTeleport(tp.position, tp.destination)
+end
 movements_desert_teleportTo:register()

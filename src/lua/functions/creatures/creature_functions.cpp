@@ -102,6 +102,11 @@ void CreatureFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Creature", "getShader", CreatureFunctions::luaCreatureGetShader);
 	Lua::registerMethod(L, "Creature", "setShader", CreatureFunctions::luaCreatureSetShader);
 
+	// Instance System
+	Lua::registerMethod(L, "Creature", "getInstanceId", CreatureFunctions::luaCreatureGetInstanceId);
+	Lua::registerMethod(L, "Creature", "setInstanceId", CreatureFunctions::luaCreatureSetInstanceId);
+	Lua::registerMethod(L, "Creature", "isInSameInstance", CreatureFunctions::luaCreatureIsInSameInstance);
+
 	CombatFunctions::init(L);
 	MonsterFunctions::init(L);
 	NpcFunctions::init(L);
@@ -1269,5 +1274,45 @@ int CreatureFunctions::luaCreatureSetShader(lua_State* L) {
 	creature->setShader(Lua::getString(L, 2));
 	g_game().updateCreatureShader(creature);
 	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+// === Instance System Lua Bindings ===
+
+int CreatureFunctions::luaCreatureGetInstanceId(lua_State* L) {
+	// creature:getInstanceId()
+	const auto &creature = Lua::getUserdataShared<Creature>(L, 1);
+	if (!creature) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_CREATURE_NOT_FOUND));
+		return 1;
+	}
+	lua_pushnumber(L, creature->getInstanceID());
+	return 1;
+}
+
+int CreatureFunctions::luaCreatureSetInstanceId(lua_State* L) {
+	// creature:setInstanceId(instanceId)
+	const auto &creature = Lua::getUserdataShared<Creature>(L, 1);
+	if (!creature) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 2);
+	creature->setInstanceID(instanceId);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int CreatureFunctions::luaCreatureIsInSameInstance(lua_State* L) {
+	// creature:isInSameInstance(otherCreature)
+	const auto &creature = Lua::getUserdataShared<Creature>(L, 1);
+	const auto &other = Lua::getUserdataShared<Creature>(L, 2);
+	if (!creature || !other) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_CREATURE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	Lua::pushBoolean(L, creature->isInSameInstance(other));
 	return 1;
 }

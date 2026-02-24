@@ -418,7 +418,7 @@ function Encounter:startOnEnter()
 		self:start()
 	end
 
-	function zoneEvents.afterLeave(zone, creature)
+	function zoneEvents.afterLeave(zone, creature, isLogout)
 		local player = creature:getPlayer()
 		if not player then
 			return

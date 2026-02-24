@@ -124,4 +124,7 @@ end
 for index, value in pairs(positions) do
 	teleport:position(value)
 end
+for _, cfg in pairs(config) do
+	registerScriptTeleport(cfg.teleportPos, cfg.destinationA)
+end
 teleport:register()

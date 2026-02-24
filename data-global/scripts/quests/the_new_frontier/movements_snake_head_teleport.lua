@@ -24,5 +24,6 @@ end
 
 for a = 1, #tpPos do
 	teleport:position(tpPos[a])
+	registerScriptTeleport(tpPos[a], destination)
 end
 teleport:register()

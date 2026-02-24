@@ -73,6 +73,12 @@ bool Creature::canSeeCreature(const std::shared_ptr<Creature> &creature) const {
 	if (!canSeeInvisibility() && creature->isInvisible()) {
 		return false;
 	}
+
+	// Instance System: creatures in different instances cannot see each other
+	if (!isInSameInstance(creature)) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -631,7 +637,7 @@ void Creature::onDeath() {
 		if (const auto &tile = getTile()) {
 			for (const auto &zone : tile->getZones()) {
 				zone->creatureRemoved(getPlayer());
-				g_callbacks().executeCallback(EventCallback_t::zoneAfterCreatureLeave, &EventCallback::zoneAfterCreatureLeave, zone, getPlayer());
+				g_callbacks().executeCallback(EventCallback_t::zoneAfterCreatureLeave, &EventCallback::zoneAfterCreatureLeave, zone, getPlayer(), false);
 			}
 		}
 	}
@@ -683,12 +689,18 @@ bool Creature::dropCorpse(const std::shared_ptr<Creature> &lastHitCreature, cons
 
 		const auto &tile = getTile();
 		if (tile && splash) {
+			// Instance System: always tag splash with creature's instance (including global instance 1)
+			// so it's only visible to players in the same instance
+			splash->setCustomAttribute("instanceid", static_cast<int64_t>(getInstanceID()));
 			g_game().internalAddItem(tile, splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
 			splash->startDecaying();
 		}
 
 		const auto &corpse = getCorpse(lastHitCreature, mostDamageCreature);
 		if (tile && corpse) {
+			// Instance System: always tag corpse with creature's instance (including global instance 1)
+			// so it's only visible to players in the same instance
+			corpse->setCustomAttribute("instanceid", static_cast<int64_t>(getInstanceID()));
 			g_game().internalAddItem(tile, corpse, INDEX_WHEREEVER, FLAG_NOLIMIT);
 			dropLoot(corpse->getContainer(), lastHitCreature);
 			corpse->startDecaying();

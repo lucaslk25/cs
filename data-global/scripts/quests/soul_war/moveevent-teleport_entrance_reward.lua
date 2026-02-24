@@ -20,4 +20,5 @@ function portalReward.onStepIn(creature, item, position, fromPosition)
 end
 
 portalReward:position({ x = 33621, y = 31416, z = 10 })
+registerScriptTeleport({ x = 33621, y = 31416, z = 10 }, { x = 33621, y = 31411, z = 10 })
 portalReward:register()

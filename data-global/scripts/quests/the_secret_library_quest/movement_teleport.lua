@@ -32,6 +32,7 @@ library:type("stepin")
 
 for _, value in pairs(setting) do
 	library:position(value.pos)
+	registerScriptTeleport(value.pos, value.newPosition)
 end
 
 library:register()

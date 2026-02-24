@@ -54,6 +54,9 @@ Npc::Npc(const std::shared_ptr<NpcType> &npcType) :
 	internalLight = npcType->info.light;
 	floorChange = npcType->info.floorChange;
 
+	// Instance System: NPCs are visible in all instances
+	setInstanceID(Creature::INSTANCE_VISIBLE_TO_ALL);
+
 	// register creature events
 	for (const std::string &scriptName : npcType->info.scripts) {
 		if (!registerCreatureEvent(scriptName)) {

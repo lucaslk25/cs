@@ -307,7 +307,7 @@ function zoneEvent.afterEnter(_zone, creature)
 	player:setIcon("magma-bubble", CreatureIconCategory_Quests, CreatureIconQuests_GreenShield, 0)
 end
 
-function zoneEvent.afterLeave(_zone, creature)
+function zoneEvent.afterLeave(_zone, creature, isLogout)
 	local player = creature:getPlayer()
 	if not player then
 		return false

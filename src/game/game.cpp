@@ -1231,10 +1231,16 @@ bool Game::placeCreature(const std::shared_ptr<Creature> &creature, const Positi
 	bool hasPlayerSpectators = false;
 	for (const auto &spectator : Spectators().find<Creature>(creature->getPosition(), true)) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendCreatureAppear(creature, creature->getPosition(), true);
+			// Instance System: only send creature appear to players in the same instance
+			if (tmpPlayer->canSeeCreature(creature)) {
+				tmpPlayer->sendCreatureAppear(creature, creature->getPosition(), true);
+			}
 			hasPlayerSpectators = true;
 		}
-		spectator->onCreatureAppear(creature, true);
+		// Instance System: only trigger onCreatureAppear for creatures in the same instance
+		if (spectator->isInSameInstance(creature)) {
+			spectator->onCreatureAppear(creature, true);
+		}
 	}
 
 	if (hasPlayerSpectators) {
@@ -1262,10 +1268,26 @@ bool Game::removeCreature(const std::shared_ptr<Creature> &creature, bool isLogo
 	auto fromZones = creature->getZones();
 
 	if (tile) {
-		std::vector<int32_t> oldStackPosVector;
 		auto spectators = Spectators().find<Creature>(tile->getPosition(), true);
-		auto playersSpectators = spectators.filter<Player>();
 
+		// Instance System: always filter out spectators from other instances BEFORE building the oldStackPosVector (same as Map::moveCreature).
+		// This prevents remove packets and stackpos from being sent to players in a different instance.
+		std::vector<std::shared_ptr<Creature>> toRemove;
+		for (const auto &spec : spectators) {
+			if (!spec->isInSameInstance(creature)) {
+				toRemove.push_back(spec);
+			}
+		}
+		for (const auto &spec : toRemove) {
+			spectators.erase(spec);
+		}
+
+		const auto playersSpectators = spectators.filter<Player>();
+
+		// Stackpos is per-spectator: oldStackPosVector[i] must match playersSpectators[i].
+		// Only spectators in the same instance are in the list (see filter above).
+		std::vector<int32_t> oldStackPosVector;
+		oldStackPosVector.reserve(playersSpectators.size());
 		for (const auto &spectator : playersSpectators) {
 			if (const auto &player = spectator->getPlayer()) {
 				oldStackPosVector.push_back(player->canSeeCreature(creature) ? tile->getStackposOfCreature(player, creature) : -1);
@@ -1276,16 +1298,23 @@ bool Game::removeCreature(const std::shared_ptr<Creature> &creature, bool isLogo
 
 		const Position &tilePosition = tile->getPosition();
 
-		// Send to client
+		// Send to client (same order as oldStackPosVector for 1:1 spectator↔stackpos)
 		size_t i = 0;
 		for (const auto &spectator : playersSpectators) {
 			if (const auto &player = spectator->getPlayer()) {
-				player->sendRemoveTileThing(tilePosition, oldStackPosVector[i++]);
+				// Instance System: only send remove if the player actually saw the creature (stackpos != -1)
+				const int32_t stackPos = oldStackPosVector[i++];
+				if (stackPos != -1) {
+					player->sendRemoveTileThing(tilePosition, stackPos);
+				}
 			}
 		}
 
-		// event method
+		// event method (only for spectators in same instance to avoid cross-instance side effects)
 		for (const auto &spectator : spectators) {
+			if (!spectator->isInSameInstance(creature)) {
+				continue;
+			}
 			spectator->onRemoveCreature(creature, isLogout);
 		}
 	}
@@ -1299,8 +1328,10 @@ bool Game::removeCreature(const std::shared_ptr<Creature> &creature, bool isLogo
 		return false;
 	}
 
+	// Instance: use creature's instance id *before* zone callbacks (afterCreatureZoneChange) can change it to global
+	creature->setInstanceIdForRemovalNotification(creature->getInstanceID());
 	parent->postRemoveNotification(creature, nullptr, 0);
-	afterCreatureZoneChange(creature, fromZones, {});
+	afterCreatureZoneChange(creature, fromZones, {}, isLogout);
 
 	creature->removeList();
 	creature->setRemoved();
@@ -2239,6 +2270,12 @@ ReturnValue Game::internalMoveItem(std::shared_ptr<Cylinder> fromCylinder, std::
 	// add item
 	if (moveItem /*m - n > 0*/) {
 		toCylinder->addThing(index, moveItem);
+
+		// Instance System: always tag items moved to ground with the actor's instanceId
+		// This ensures items are only visible to players in the same instance
+		if (actor && toCylinder->getTile()) {
+			moveItem->setCustomAttribute("instanceid", static_cast<int64_t>(actor->getInstanceID()));
+		}
 	}
 
 	if (itemIndex != -1) {
@@ -6634,6 +6671,10 @@ void Game::playerWhisper(const std::shared_ptr<Player> &player, const std::strin
 	// Send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &spectatorPlayer = spectator->getPlayer()) {
+			// Instance System: only send whisper to players in the same instance
+			if (!spectatorPlayer->isInSameInstance(player)) {
+				continue;
+			}
 			if (!Position::areInRange<1, 1>(player->getPosition(), spectatorPlayer->getPosition())) {
 				spectatorPlayer->sendCreatureSay(player, TALKTYPE_WHISPER, "pspsps");
 			} else {
@@ -6644,6 +6685,10 @@ void Game::playerWhisper(const std::shared_ptr<Player> &player, const std::strin
 
 	// event method
 	for (const auto &spectator : spectators) {
+		// Instance System: only trigger event for creatures in the same instance
+		if (!spectator->isInSameInstance(player)) {
+			continue;
+		}
 		spectator->onCreatureSay(player, TALKTYPE_WHISPER, text);
 	}
 }
@@ -6743,6 +6788,9 @@ bool Game::internalCreatureTurn(const std::shared_ptr<Creature> &creature, Direc
 	}
 
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureTurn(creature);
 	}
 	return true;
@@ -6774,8 +6822,12 @@ bool Game::internalCreatureSay(const std::shared_ptr<Creature> &creature, SpeakC
 	}
 
 	// Send to client
+	// Instance System: filter speech by instance
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			if (creature && !tmpPlayer->isInSameInstance(creature)) {
+				continue;
+			}
 			if (!ghostMode || tmpPlayer->canSeeCreature(creature)) {
 				tmpPlayer->sendCreatureSay(creature, type, text, pos);
 			}
@@ -6784,6 +6836,9 @@ bool Game::internalCreatureSay(const std::shared_ptr<Creature> &creature, SpeakC
 
 	// event method
 	for (const auto &spectator : spectators) {
+		if (creature && !spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->onCreatureSay(creature, type, text);
 	}
 	return true;
@@ -6875,6 +6930,10 @@ void Game::changeSpeed(const std::shared_ptr<Creature> &creature, int32_t varSpe
 
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition())) {
+		// Instance System: only send speed updates to players in the same instance
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendChangeSpeed(creature, creature->getStepSpeed());
 	}
 }
@@ -6884,6 +6943,9 @@ void Game::setCreatureSpeed(const std::shared_ptr<Creature> &creature, int32_t s
 
 	// Send creature speed to client
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition())) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendChangeSpeed(creature, creature->getStepSpeed());
 	}
 }
@@ -6896,6 +6958,9 @@ void Game::changePlayerSpeed(const std::shared_ptr<Player> &player, int32_t varS
 
 	// Send new player speed to the spectators
 	for (const auto &creatureSpectator : Spectators().find<Player>(player->getPosition())) {
+		if (!creatureSpectator->isInSameInstance(player)) {
+			continue;
+		}
 		creatureSpectator->getPlayer()->sendChangeSpeed(player, player->getStepSpeed());
 	}
 }
@@ -6917,6 +6982,10 @@ void Game::internalCreatureChangeOutfit(const std::shared_ptr<Creature> &creatur
 
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		// Instance System: only send outfit changes to players in the same instance
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureChangeOutfit(creature, outfit);
 	}
 }
@@ -6924,6 +6993,10 @@ void Game::internalCreatureChangeOutfit(const std::shared_ptr<Creature> &creatur
 void Game::internalCreatureChangeVisible(const std::shared_ptr<Creature> &creature, bool visible) {
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		// Instance System: only send visibility changes to players in the same instance
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureChangeVisible(creature, visible);
 	}
 }
@@ -6931,6 +7004,10 @@ void Game::internalCreatureChangeVisible(const std::shared_ptr<Creature> &creatu
 void Game::changeLight(const std::shared_ptr<Creature> &creature) {
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		// Instance System: only send light changes to players in the same instance
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureLight(creature);
 	}
 }
@@ -6938,6 +7015,10 @@ void Game::changeLight(const std::shared_ptr<Creature> &creature) {
 void Game::updateCreatureIcon(const std::shared_ptr<Creature> &creature) {
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		// Instance System: only send icon changes to players in the same instance
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureIcon(creature);
 	}
 }
@@ -6949,17 +7030,27 @@ void Game::reloadCreature(const std::shared_ptr<Creature> &creature) {
 	}
 
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition())) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->reloadCreature(creature);
 	}
 }
 
-void Game::sendSingleSoundEffect(const Position &pos, SoundEffect_t soundId, const std::shared_ptr<Creature> &actor /* = nullptr*/) {
+void Game::sendSingleSoundEffect(const Position &pos, SoundEffect_t soundId, const std::shared_ptr<Creature> &actor /* = nullptr*/, uint32_t forceInstanceId /* = 0 */) {
 	if (soundId == SoundEffect_t::SILENCE) {
 		return;
 	}
 
+	const uint32_t instanceId = forceInstanceId > 0 ? forceInstanceId : (actor ? actor->getInstanceID() : 0);
+
 	using enum SourceEffect_t;
 	for (const auto &spectator : Spectators().find<Player>(pos)) {
+		if (instanceId != 0 && instanceId != Creature::INSTANCE_VISIBLE_TO_ALL
+			&& spectator->getInstanceID() != instanceId) {
+			continue;
+		}
+
 		SourceEffect_t source = CREATURES;
 		if (!actor || actor->getNpc()) {
 			source = GLOBAL;
@@ -6973,14 +7064,21 @@ void Game::sendSingleSoundEffect(const Position &pos, SoundEffect_t soundId, con
 	}
 }
 
-void Game::sendDoubleSoundEffect(const Position &pos, SoundEffect_t mainSoundEffect, SoundEffect_t secondarySoundEffect, const std::shared_ptr<Creature> &actor /* = nullptr*/) {
+void Game::sendDoubleSoundEffect(const Position &pos, SoundEffect_t mainSoundEffect, SoundEffect_t secondarySoundEffect, const std::shared_ptr<Creature> &actor /* = nullptr*/, uint32_t forceInstanceId /* = 0 */) {
 	if (secondarySoundEffect == SoundEffect_t::SILENCE) {
-		sendSingleSoundEffect(pos, mainSoundEffect, actor);
+		sendSingleSoundEffect(pos, mainSoundEffect, actor, forceInstanceId);
 		return;
 	}
 
+	const uint32_t instanceId = forceInstanceId > 0 ? forceInstanceId : (actor ? actor->getInstanceID() : 0);
+
 	using enum SourceEffect_t;
 	for (const auto &spectator : Spectators().find<Player>(pos)) {
+		if (instanceId != 0 && instanceId != Creature::INSTANCE_VISIBLE_TO_ALL
+			&& spectator->getInstanceID() != instanceId) {
+			continue;
+		}
+
 		SourceEffect_t source = CREATURES;
 		if (!actor || actor->getNpc()) {
 			source = GLOBAL;
@@ -7011,7 +7109,7 @@ bool Game::combatBlockHit(CombatDamage &damage, const std::shared_ptr<Creature> 
 	// Skill dodge (ruse)
 	if (targetPlayer) {
 		auto chance = targetPlayer->getDodgeChance();
-		if (chance > 0 && uniform_random(0, 10000) < chance || damage.hazardDodge) {
+		if ((chance > 0 && uniform_random(0, 10000) < chance) || damage.hazardDodge) {
 			InternalGame::sendBlockEffect(BLOCK_DODGE, damage.primary.type, target->getPosition(), attacker);
 			targetPlayer->sendTextMessage(MESSAGE_ATTENTION, "You dodged an attack.");
 			return true;
@@ -7225,6 +7323,10 @@ void Game::combatGetTypeInfo(CombatType_t combatType, const std::shared_ptr<Crea
 			}
 
 			if (splash) {
+				// Instance System: always tag splash with target's instance (including global instance 1)
+				if (target) {
+					splash->setCustomAttribute("instanceid", static_cast<int64_t>(target->getInstanceID()));
+				}
 				internalAddItem(target->getTile(), splash, INDEX_WHEREEVER, FLAG_NOLIMIT);
 				splash->startDecaying();
 			}
@@ -7549,9 +7651,20 @@ bool Game::combatChangeHealth(const std::shared_ptr<Creature> &attacker, const s
 			message.primary.value = realHealthChange;
 			message.primary.color = TEXTCOLOR_PASTELRED;
 
-			for (const auto &spectator : Spectators().find<Player>(targetPos)) {
+			// Instance System: determine the instance for healing messages
+		uint32_t healInstanceId = target ? target->getInstanceID() : 0;
+		if ((healInstanceId == 0 || healInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && attacker) {
+			healInstanceId = attacker->getInstanceID();
+		}
+
+		for (const auto &spectator : Spectators().find<Player>(targetPos)) {
 				const auto &tmpPlayer = spectator->getPlayer();
 				if (!tmpPlayer) {
+					continue;
+				}
+
+				// Instance System: only send heal messages to players in the same instance
+				if (healInstanceId != 0 && tmpPlayer->getInstanceID() != healInstanceId) {
 					continue;
 				}
 
@@ -7705,10 +7818,16 @@ bool Game::combatChangeHealth(const std::shared_ptr<Creature> &attacker, const s
 			}
 		}
 
+		// Instance System: determine instance for combat effects
+		uint32_t combatEffectInstanceId = target ? target->getInstanceID() : 0;
+		if ((combatEffectInstanceId == 0 || combatEffectInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && attacker) {
+			combatEffectInstanceId = attacker->getInstanceID();
+		}
+
 		if (damage.fatal) {
-			addMagicEffect(spectators.data(), targetPos, CONST_ME_FATAL);
+			addMagicEffect(spectators.data(), targetPos, CONST_ME_FATAL, combatEffectInstanceId);
 		} else if (damage.critical) {
-			addMagicEffect(spectators.data(), targetPos, CONST_ME_CRITICAL_DAMAGE);
+			addMagicEffect(spectators.data(), targetPos, CONST_ME_CRITICAL_DAMAGE, combatEffectInstanceId);
 		}
 
 		if (!damage.extension && attackerMonster && targetPlayer) {
@@ -7783,6 +7902,11 @@ bool Game::combatChangeHealth(const std::shared_ptr<Creature> &attacker, const s
 				for (const auto &spectator : spectators) {
 					const auto &tmpPlayer = spectator->getPlayer();
 					if (!tmpPlayer || tmpPlayer->getPosition().z != targetPos.z) {
+						continue;
+					}
+
+					// Instance System: only send mana damage messages to players in the same instance
+					if (combatEffectInstanceId != 0 && tmpPlayer->getInstanceID() != combatEffectInstanceId) {
 						continue;
 					}
 
@@ -7987,9 +8111,20 @@ void Game::sendMessages(
 
 	std::string spectatorMessage;
 
+	// Instance System: determine the instance for this combat
+	uint32_t combatInstanceId = target ? target->getInstanceID() : 0;
+	if ((combatInstanceId == 0 || combatInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && attacker) {
+		combatInstanceId = attacker->getInstanceID();
+	}
+
 	for (const std::shared_ptr<Creature> &spectator : spectators) {
 		std::shared_ptr<Player> tmpPlayer = spectator->getPlayer();
 		if (!tmpPlayer || tmpPlayer->getPosition().z != targetPos.z) {
+			continue;
+		}
+
+		// Instance System: only send damage messages to players in the same instance
+		if (combatInstanceId != 0 && tmpPlayer->getInstanceID() != combatInstanceId) {
 			continue;
 		}
 
@@ -8106,18 +8241,21 @@ void Game::sendEffects(
 	const std::shared_ptr<Creature> &target, const CombatDamage &damage, const Position &targetPos, TextMessage &message,
 	const CreatureVector &spectators
 ) {
+	// Instance System: determine instance for effect visibility
+	uint32_t effectInstanceId = target ? target->getInstanceID() : 0;
+
 	uint16_t hitEffect;
 	if (message.primary.value) {
 		combatGetTypeInfo(damage.primary.type, target, message.primary.color, hitEffect);
 		if (hitEffect != CONST_ME_NONE) {
-			addMagicEffect(spectators, targetPos, hitEffect);
+			addMagicEffect(spectators, targetPos, hitEffect, effectInstanceId);
 		}
 	}
 
 	if (message.secondary.value) {
 		combatGetTypeInfo(damage.secondary.type, target, message.secondary.color, hitEffect);
 		if (hitEffect != CONST_ME_NONE) {
-			addMagicEffect(spectators, targetPos, hitEffect);
+			addMagicEffect(spectators, targetPos, hitEffect, effectInstanceId);
 		}
 	}
 }
@@ -8285,9 +8423,20 @@ bool Game::combatChangeMana(const std::shared_ptr<Creature> &attacker, const std
 			message.primary.value = realManaChange;
 			message.primary.color = TEXTCOLOR_MAYABLUE;
 
+			// Instance System: determine the instance for mana restore messages
+			uint32_t manaInstanceId = target ? target->getInstanceID() : 0;
+			if ((manaInstanceId == 0 || manaInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && attacker) {
+				manaInstanceId = attacker->getInstanceID();
+			}
+
 			for (const auto &spectator : spectators) {
 				const auto &tmpPlayer = spectator->getPlayer();
 				if (!tmpPlayer) {
+					continue;
+				}
+
+				// Instance System: only send mana restore messages to players in the same instance
+				if (manaInstanceId != 0 && manaInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL && tmpPlayer->getInstanceID() != manaInstanceId) {
 					continue;
 				}
 
@@ -8386,9 +8535,20 @@ bool Game::combatChangeMana(const std::shared_ptr<Creature> &attacker, const std
 		message.primary.value = manaLoss;
 		message.primary.color = TEXTCOLOR_BLUE;
 
+		// Instance System: determine the instance for mana drain messages
+		uint32_t drainInstanceId = target ? target->getInstanceID() : 0;
+		if ((drainInstanceId == 0 || drainInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && attacker) {
+			drainInstanceId = attacker->getInstanceID();
+		}
+
 		for (const auto &spectator : spectators) {
 			const auto &tmpPlayer = spectator->getPlayer();
 			if (!tmpPlayer) {
+				continue;
+			}
+
+			// Instance System: only send mana drain messages to players in the same instance
+			if (drainInstanceId != 0 && drainInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL && tmpPlayer->getInstanceID() != drainInstanceId) {
 				continue;
 			}
 
@@ -8468,6 +8628,10 @@ void Game::addCreatureHealth(const CreatureVector &spectators, const std::shared
 	}
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			// Instance System: only send health updates to players in the same instance
+			if (!tmpPlayer->isInSameInstance(target)) {
+				continue;
+			}
 			tmpPlayer->sendCreatureHealth(target);
 		}
 	}
@@ -8486,45 +8650,73 @@ void Game::addPlayerVocation(const std::shared_ptr<Player> &target) {
 	}
 
 	for (const auto &spectator : Spectators().find<Player>(target->getPosition(), true)) {
+		if (!spectator->isInSameInstance(target)) {
+			continue;
+		}
 		spectator->getPlayer()->sendPlayerVocation(target);
 	}
 }
 
-void Game::addMagicEffect(const Position &pos, uint16_t effect) {
-	auto spectators = Spectators().find<Player>(pos, true);
-	addMagicEffect(spectators.data(), pos, effect);
+// Instance System: auto-detect instanceId from the first non-global creature on a tile.
+// Returns 0 if tile is empty or all creatures are VISIBLE_TO_ALL (meaning global/send to all).
+static uint32_t detectInstanceFromTile(const Position &pos) {
+	const auto &tile = g_game().map.getTile(pos);
+	if (tile) {
+		if (const auto *creatures = tile->getCreatures()) {
+			for (const auto &creature : *creatures) {
+				if (creature && !creature->isVisibleToAllInstances()) {
+					return creature->getInstanceID();
+				}
+			}
+		}
+	}
+	return 0;
 }
 
-void Game::addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect) {
+void Game::addMagicEffect(const Position &pos, uint16_t effect, uint32_t forceInstanceId) {
+	auto spectators = Spectators().find<Player>(pos, true);
+	addMagicEffect(spectators.data(), pos, effect, forceInstanceId);
+}
+
+void Game::addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect, uint32_t forceInstanceId) {
+	const uint32_t instanceId = forceInstanceId > 0 ? forceInstanceId : detectInstanceFromTile(pos);
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendMagicEffect(pos, effect);
+			if (instanceId == 0 || instanceId == Creature::INSTANCE_VISIBLE_TO_ALL || tmpPlayer->getInstanceID() == instanceId) {
+				tmpPlayer->sendMagicEffect(pos, effect);
+			}
 		}
 	}
 }
 
-void Game::removeMagicEffect(const Position &pos, uint16_t effect) {
+void Game::removeMagicEffect(const Position &pos, uint16_t effect, uint32_t forceInstanceId) {
 	auto spectators = Spectators().find<Player>(pos, true);
-	removeMagicEffect(spectators.data(), pos, effect);
+	removeMagicEffect(spectators.data(), pos, effect, forceInstanceId);
 }
 
-void Game::removeMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect) {
+void Game::removeMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect, uint32_t forceInstanceId) {
+	const uint32_t instanceId = forceInstanceId > 0 ? forceInstanceId : detectInstanceFromTile(pos);
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->removeMagicEffect(pos, effect);
+			if (instanceId == 0 || instanceId == Creature::INSTANCE_VISIBLE_TO_ALL || tmpPlayer->getInstanceID() == instanceId) {
+				tmpPlayer->removeMagicEffect(pos, effect);
+			}
 		}
 	}
 }
 
-void Game::addDistanceEffect(const Position &fromPos, const Position &toPos, uint16_t effect) {
+void Game::addDistanceEffect(const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t forceInstanceId) {
 	auto spectators = Spectators().find<Player>(fromPos).find<Player>(toPos);
-	addDistanceEffect(spectators.data(), fromPos, toPos, effect);
+	addDistanceEffect(spectators.data(), fromPos, toPos, effect, forceInstanceId);
 }
 
-void Game::addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect) {
+void Game::addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t forceInstanceId) {
+	const uint32_t instanceId = forceInstanceId > 0 ? forceInstanceId : detectInstanceFromTile(fromPos);
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendDistanceShoot(fromPos, toPos, effect);
+			if (instanceId == 0 || instanceId == Creature::INSTANCE_VISIBLE_TO_ALL || tmpPlayer->getInstanceID() == instanceId) {
+				tmpPlayer->sendDistanceShoot(fromPos, toPos, effect);
+			}
 		}
 	}
 }
@@ -8692,6 +8884,9 @@ void Game::broadcastMessage(const std::string &text, MessageClasses type) const 
 void Game::updateCreatureWalkthrough(const std::shared_ptr<Creature> &creature) {
 	// Send to clients
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		const auto &tmpPlayer = spectator->getPlayer();
 		tmpPlayer->sendCreatureWalkthrough(creature, tmpPlayer->canWalkthroughEx(creature));
 	}
@@ -8703,12 +8898,18 @@ void Game::updateCreatureSkull(const std::shared_ptr<Creature> &creature) const 
 	}
 
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureSkull(creature);
 	}
 }
 
 void Game::updatePlayerShield(const std::shared_ptr<Player> &player) {
 	for (const auto &spectator : Spectators().find<Player>(player->getPosition(), true)) {
+		if (!spectator->isInSameInstance(player)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureShield(player);
 	}
 }
@@ -8851,6 +9052,9 @@ void Game::updatePlayerHelpers(const std::shared_ptr<Player> &player) {
 
 	const uint16_t helpers = player->getHelpers();
 	for (const auto &spectator : Spectators().find<Player>(player->getPosition(), true)) {
+		if (!spectator->isInSameInstance(player)) {
+			continue;
+		}
 		spectator->getPlayer()->sendCreatureHelpers(player->getID(), helpers);
 	}
 }
@@ -10732,6 +10936,9 @@ void Game::sendUpdateCreature(const std::shared_ptr<Creature> &creature) {
 	}
 
 	for (const auto &spectator : Spectators().find<Player>(creature->getPosition(), true)) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		spectator->getPlayer()->sendUpdateCreature(creature);
 	}
 }
@@ -10858,18 +11065,12 @@ uint32_t Game::makeFiendishMonster(uint32_t forgeableMonsterId /* = 0*/, bool cr
 	std::string saveIntervalType = g_configManager().getString(FORGE_FIENDISH_INTERVAL_TYPE);
 	auto saveIntervalConfigTime = std::atoi(g_configManager().getString(FORGE_FIENDISH_INTERVAL_TIME).c_str());
 	int intervalTime = 0;
-	time_t timeToChangeFiendish;
 	if (saveIntervalType == "second") {
 		intervalTime = 1000;
-		timeToChangeFiendish = 1;
 	} else if (saveIntervalType == "minute") {
 		intervalTime = 60 * 1000;
-		timeToChangeFiendish = 60;
 	} else if (saveIntervalType == "hour") {
 		intervalTime = 60 * 60 * 1000;
-		timeToChangeFiendish = 3600;
-	} else {
-		timeToChangeFiendish = 3600;
 	}
 
 	uint32_t finalTime = 0;
@@ -11260,7 +11461,7 @@ ReturnValue Game::beforeCreatureZoneChange(const std::shared_ptr<Creature> &crea
 	return RETURNVALUE_NOERROR;
 }
 
-void Game::afterCreatureZoneChange(const std::shared_ptr<Creature> &creature, const std::unordered_set<std::shared_ptr<Zone>> &fromZones, const std::unordered_set<std::shared_ptr<Zone>> &toZones) const {
+void Game::afterCreatureZoneChange(const std::shared_ptr<Creature> &creature, const std::unordered_set<std::shared_ptr<Zone>> &fromZones, const std::unordered_set<std::shared_ptr<Zone>> &toZones, bool isLogout) const {
 	if (!creature) {
 		return;
 	}
@@ -11277,7 +11478,7 @@ void Game::afterCreatureZoneChange(const std::shared_ptr<Creature> &creature, co
 
 	for (const auto &zone : zonesLeaving) {
 		zone->creatureRemoved(creature);
-		g_callbacks().executeCallback(EventCallback_t::zoneAfterCreatureLeave, &EventCallback::zoneAfterCreatureLeave, zone, creature);
+		g_callbacks().executeCallback(EventCallback_t::zoneAfterCreatureLeave, &EventCallback::zoneAfterCreatureLeave, zone, creature, isLogout);
 	}
 
 	for (const auto &zone : zonesEntering) {
@@ -12041,6 +12242,9 @@ void Game::internalDecayItem(const std::shared_ptr<Item> &item) {
 void Game::sendAttachedEffect(const std::shared_ptr<Creature> &creature, uint16_t effectId) {
 	auto spectators = Spectators().find<Player>(creature->getPosition(), true);
 	for (const auto &spectator : spectators) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		const auto &player = spectator->getPlayer();
 		if (player) {
 			player->attachedEffects().sendAttachedEffect(creature, effectId);
@@ -12051,6 +12255,9 @@ void Game::sendAttachedEffect(const std::shared_ptr<Creature> &creature, uint16_
 void Game::sendDetachEffect(const std::shared_ptr<Creature> &creature, uint16_t effectId) {
 	auto spectators = Spectators().find<Player>(creature->getPosition(), true);
 	for (const auto &spectator : spectators) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		const auto &player = spectator->getPlayer();
 		if (player) {
 			player->attachedEffects().sendDetachEffect(creature, effectId);
@@ -12061,6 +12268,9 @@ void Game::sendDetachEffect(const std::shared_ptr<Creature> &creature, uint16_t 
 void Game::updateCreatureShader(const std::shared_ptr<Creature> &creature) {
 	auto spectators = Spectators().find<Player>(creature->getPosition(), true);
 	for (const auto &spectator : spectators) {
+		if (!spectator->isInSameInstance(creature)) {
+			continue;
+		}
 		const auto &player = spectator->getPlayer();
 		if (player) {
 			player->attachedEffects().sendShader(creature, creature->getShader());
@@ -12074,6 +12284,9 @@ void Game::playerSetTyping(uint32_t playerId, uint8_t typing) {
 		return;
 	}
 	for (const auto &spectator : Spectators().find<Player>(player->getPosition(), true)) {
+		if (!spectator->isInSameInstance(player)) {
+			continue;
+		}
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
 			tmpPlayer->sendPlayerTyping(player, typing);
 		}

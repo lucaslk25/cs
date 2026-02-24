@@ -46,5 +46,6 @@ end
 
 for a = 1, #config do
 	teleports:position(config[a].teleportPos)
+	registerScriptTeleport(config[a].teleportPos, config[a].destination)
 end
 teleports:register()

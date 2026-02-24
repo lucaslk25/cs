@@ -89,16 +89,26 @@ function shrineEntrance.onStepIn(creature, item, position, fromPosition)
 	return true
 end
 
+local shrineDestinations = {
+	ice = { x = 32192, y = 31419, z = 2 },
+	earth = { x = 32972, y = 32227, z = 7 },
+	fire = { x = 32911, y = 32336, z = 15 },
+	energy = { x = 33059, y = 32716, z = 5 },
+}
 for b = 1, #shrinesEntrance.ice do
 	shrineEntrance:position(shrinesEntrance.ice[b])
+	registerScriptTeleport(shrinesEntrance.ice[b], shrineDestinations.ice)
 end
 for c = 1, #shrinesEntrance.earth do
 	shrineEntrance:position(shrinesEntrance.earth[c])
+	registerScriptTeleport(shrinesEntrance.earth[c], shrineDestinations.earth)
 end
 for d = 1, #shrinesEntrance.fire do
 	shrineEntrance:position(shrinesEntrance.fire[d])
+	registerScriptTeleport(shrinesEntrance.fire[d], shrineDestinations.fire)
 end
 for e = 1, #shrinesEntrance.energy do
 	shrineEntrance:position(shrinesEntrance.energy[e])
+	registerScriptTeleport(shrinesEntrance.energy[e], shrineDestinations.energy)
 end
 shrineEntrance:register()

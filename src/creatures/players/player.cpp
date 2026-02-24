@@ -1382,11 +1382,22 @@ bool Player::canSeeCreature(const std::shared_ptr<Creature> &creature) const {
 	if (!creature->getPlayer() && !canSeeInvisibility() && creature->isInvisible()) {
 		return false;
 	}
+
+	// Instance System: creatures in different instances are invisible to each other
+	if (!isInSameInstance(creature)) {
+		return false;
+	}
+
 	return true;
 }
 
 bool Player::canWalkthrough(const std::shared_ptr<Creature> &creature) {
 	if (group->access || creature->isInGhostMode()) {
+		return true;
+	}
+
+	// Instance System: always allow walkthrough for creatures in different instances
+	if (!isInSameInstance(creature)) {
 		return true;
 	}
 
@@ -1435,6 +1446,11 @@ bool Player::canWalkthrough(const std::shared_ptr<Creature> &creature) {
 
 bool Player::canWalkthroughEx(const std::shared_ptr<Creature> &creature) const {
 	if (group->access) {
+		return true;
+	}
+
+	// Instance System: always allow walkthrough for creatures in different instances
+	if (!isInSameInstance(creature)) {
 		return true;
 	}
 
@@ -2787,7 +2803,7 @@ void Player::applyImbuementScrollToItem(const uint16_t scrollId, const std::shar
 		}
 	}
 
-	if (slot < 0 || slot >= itemSlots) {
+	if (slot >= itemSlots) {
 		this->sendTextMessage(MESSAGE_EVENT_ADVANCE, "You have apply imbuement in an invalid slot.");
 		return;
 	}
@@ -3629,6 +3645,10 @@ void Player::addExperience(const std::shared_ptr<Creature> &target, uint64_t exp
 			message.type = MESSAGE_EXPERIENCE_OTHERS;
 			message.text = getName() + " gained " + expString;
 			for (const auto &spectator : spectators) {
+				// Instance System: only send XP messages to players in the same instance
+				if (spectator->getInstanceID() != getInstanceID()) {
+					continue;
+				}
 				spectator->getPlayer()->sendTextMessage(message);
 			}
 		}
@@ -3721,6 +3741,10 @@ void Player::removeExperience(uint64_t exp, bool sendText /* = false*/) {
 			message.type = MESSAGE_EXPERIENCE_OTHERS;
 			message.text = getName() + " lost " + expString;
 			for (const auto &spectator : spectators) {
+				// Instance System: only send XP loss messages to players in the same instance
+				if (spectator->getInstanceID() != getInstanceID()) {
+					continue;
+				}
 				spectator->getPlayer()->sendTextMessage(message);
 			}
 		}
@@ -4429,10 +4453,14 @@ bool Player::spawn() {
 	const auto &spectators = Spectators().find<Creature>(position, true);
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			tmpPlayer->sendCreatureAppear(static_self_cast<Player>(), pos, true);
+			if (tmpPlayer->canSeeCreature(static_self_cast<Player>())) {
+				tmpPlayer->sendCreatureAppear(static_self_cast<Player>(), pos, true);
+			}
 		}
 
-		spectator->onCreatureAppear(static_self_cast<Player>(), false);
+		if (spectator->isInSameInstance(static_self_cast<Player>())) {
+			spectator->onCreatureAppear(static_self_cast<Player>(), false);
+		}
 	}
 
 	// notify status change when login after dead
@@ -4480,7 +4508,10 @@ void Player::despawn() {
 			oldStackPosVector.emplace_back(player->canSeeCreature(static_self_cast<Player>()) ? tile->getStackposOfCreature(player, getPlayer()) : -1);
 		}
 		if (const auto &player = spectator->getPlayer()) {
-			player->sendRemoveTileThing(tile->getPosition(), oldStackPosVector[i++]);
+			const int32_t stackPos = oldStackPosVector[i++];
+			if (stackPos != -1) {
+				player->sendRemoveTileThing(tile->getPosition(), stackPos);
+			}
 		}
 
 		spectator->onRemoveCreature(static_self_cast<Player>(), false);
@@ -8697,6 +8728,12 @@ void Player::sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Posit
 	}
 }
 
+void Player::sendMapDescription(const Position &pos) const {
+	if (client) {
+		client->sendMapDescription(pos);
+	}
+}
+
 void Player::sendChannelMessage(const std::string &author, const std::string &text, SpeakClasses type, uint16_t channel) const {
 	if (client) {
 		client->sendChannelMessage(author, text, type, channel);
@@ -10119,12 +10156,14 @@ bool Player::saySpell(SpeakClasses type, const std::string &text, bool isGhostMo
 	// Send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
-			if (!isGhostMode || tmpPlayer->canSeeCreature(static_self_cast<Player>())) {
-				if (g_configManager().getBoolean(EMOTE_SPELLS)) {
-					tmpPlayer->sendCreatureSay(static_self_cast<Player>(), TALKTYPE_MONSTER_SAY, text, pos);
-				} else {
-					tmpPlayer->sendCreatureSay(static_self_cast<Player>(), TALKTYPE_SPELL_USE, text, pos);
-				}
+			// Instance System: only send spell words to players in the same instance
+			if (!tmpPlayer->canSeeCreature(static_self_cast<Player>())) {
+				continue;
+			}
+			if (g_configManager().getBoolean(EMOTE_SPELLS)) {
+				tmpPlayer->sendCreatureSay(static_self_cast<Player>(), TALKTYPE_MONSTER_SAY, text, pos);
+			} else {
+				tmpPlayer->sendCreatureSay(static_self_cast<Player>(), TALKTYPE_SPELL_USE, text, pos);
 			}
 		}
 	}
@@ -10133,6 +10172,11 @@ bool Player::saySpell(SpeakClasses type, const std::string &text, bool isGhostMo
 	for (const auto &spectator : spectators) {
 		const auto &tmpPlayer = spectator->getPlayer();
 		if (!tmpPlayer) {
+			continue;
+		}
+
+		// Instance System: only trigger lua event for players in the same instance
+		if (!tmpPlayer->isInSameInstance(static_self_cast<Player>())) {
 			continue;
 		}
 
@@ -12682,8 +12726,6 @@ void Player::removeEquippedWeaponProficiency(const uint16_t itemId) {
 	if (it == weaponProficiencies.end()) {
 		return;
 	}
-
-	const WeaponProficiencyData &playerProficiencyData = it->second;
 
 	const WeaponProficiencyStruct* proficiencyData = g_proficiencies().getProficiencyByItemId(itemId);
 	if (!proficiencyData) {

@@ -63,7 +63,7 @@ void IOMap::loadMap(Map* map, const Position &pos) {
 	uint32_t version = stream.getU32();
 	map->width = stream.getU16();
 	map->height = stream.getU16();
-	uint32_t majorVersionItems = stream.getU32();
+	stream.getU32(); // majorVersionItems
 	stream.getU32(); // minorVersionItems
 
 	if (version > 5) {

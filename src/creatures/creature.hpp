@@ -718,6 +718,60 @@ public:
 		charmChanceModifier = value;
 	}
 
+	// === Instance System (Instanced Hunts) ===
+	// Instance ID 1 = global shared world (default)
+	// Instance ID 2+ = private instances
+	// INSTANCE_VISIBLE_TO_ALL = visible in every instance (e.g. NPCs)
+	static constexpr uint32_t INSTANCE_VISIBLE_TO_ALL = UINT32_MAX;
+
+	uint32_t getInstanceID() const {
+		return m_instanceId;
+	}
+
+	void setInstanceID(uint32_t id) {
+		m_instanceId = id;
+	}
+
+	bool isInSameInstance(const std::shared_ptr<Creature> &other) const {
+		if (!other) {
+			return false;
+		}
+		if (m_instanceId == INSTANCE_VISIBLE_TO_ALL || other->getInstanceID() == INSTANCE_VISIBLE_TO_ALL) {
+			return true;
+		}
+		return m_instanceId == other->getInstanceID();
+	}
+
+	bool isVisibleToAllInstances() const {
+		return m_instanceId == INSTANCE_VISIBLE_TO_ALL;
+	}
+
+	bool isInGlobalInstance() const {
+		return m_instanceId == 1;
+	}
+
+	bool isInPrivateInstance() const {
+		return m_instanceId != 1 && m_instanceId != INSTANCE_VISIBLE_TO_ALL;
+	}
+
+	// Instance at removal time (set by Game::removeCreature before postRemoveNotification so Tile filters by pre-zone-change instance)
+	void setInstanceIdForRemovalNotification(uint32_t id) {
+		m_instanceIdForRemovalNotification = id;
+	}
+	std::optional<uint32_t> takeInstanceIdForRemovalNotification() {
+		auto v = m_instanceIdForRemovalNotification;
+		m_instanceIdForRemovalNotification = std::nullopt;
+		return v;
+	}
+
+	bool needsContextRefresh() const {
+		return m_needsContextRefresh;
+	}
+
+	void setNeedsContextRefresh(bool value) {
+		m_needsContextRefresh = value;
+	}
+
 	std::string getShader() const {
 		return shader;
 	}
@@ -825,6 +879,11 @@ protected:
 	int8_t charmChanceModifier = 0;
 
 	uint8_t wheelOfDestinyDrainBodyDebuff = 0;
+
+	// Instance System
+	uint32_t m_instanceId = 1; // 1 = global, 2+ = private instance
+	std::optional<uint32_t> m_instanceIdForRemovalNotification; // Used by Tile::postRemoveNotification to filter by instance before zone callbacks change it
+	bool m_needsContextRefresh = false; // True during instance transition, blocks creature movements
 
 	// use map here instead of phmap to keep the keys in a predictable order
 	std::map<std::string, CreatureIcon> creatureIcons = {};

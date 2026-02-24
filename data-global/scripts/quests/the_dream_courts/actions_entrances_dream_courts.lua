@@ -21,7 +21,9 @@ function entranceDreamCourts.onStepIn(creature, item, position, fromPosition)
 end
 
 entranceDreamCourts:type("stepin")
+local dreamCourtsDestination = { x = 32208, y = 32093, z = 13 }
 for value in pairs(config) do
 	entranceDreamCourts:position(config[value].position)
+	registerScriptTeleport(config[value].position, dreamCourtsDestination)
 end
 entranceDreamCourts:register()

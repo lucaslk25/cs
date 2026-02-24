@@ -118,4 +118,21 @@ private:
 	static int luaGameSetRankName(lua_State* L);
 	static int luaGameCreateGuild(lua_State* L);
 	static int luaGameJoinGuild(lua_State* L);
+
+	// Instance System
+	static int luaGameCreateInstance(lua_State* L);
+	static int luaGameDestroyInstance(lua_State* L);
+	static int luaGameCreateInstanceMonster(lua_State* L);
+	static int luaGamePopulateInstanceFromMap(lua_State* L);
+	static int luaGamePopulateInstanceFromZone(lua_State* L);
+	static int luaGameTrackInstancePlayer(lua_State* L);
+	static int luaGameUntrackInstancePlayer(lua_State* L);
+	static int luaGameFindInstanceByPlayerGuid(lua_State* L);
+
+	// Spawn Query System
+	static int luaGameGetSpawnsInArea(lua_State* L);
+	static int luaGameDiscoverSpawnClusters(lua_State* L);
+
+	// Teleport Query System
+	static int luaGameFindTeleportsToArea(lua_State* L);
 };

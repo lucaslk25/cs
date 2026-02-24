@@ -149,11 +149,11 @@ function ZoneEvent:register()
 
 	if self.afterLeave then
 		local afterLeave = EventCallback("ZoneEventAfterLeave", true)
-		function afterLeave.zoneAfterCreatureLeave(zone, creature)
+		function afterLeave.zoneAfterCreatureLeave(zone, creature, isLogout)
 			if zone ~= self.zone then
 				return true
 			end
-			self.afterLeave(zone, creature)
+			self.afterLeave(zone, creature, isLogout)
 		end
 
 		afterLeave:register()

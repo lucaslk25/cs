@@ -372,6 +372,21 @@ void Map::moveCreature(const std::shared_ptr<Creature> &creature, const std::sha
 		spectators.find<Creature>(newPos, true, 0, 0, 0, 0, false);
 	}
 
+	// Instance System: if creature is in a private instance (>1), filter out spectators
+	// from other instances BEFORE building the oldStackPosVector
+	// This prevents movement packets being sent to players who shouldn't see this creature
+	if (creature->getInstanceID() > 1) {
+		std::vector<std::shared_ptr<Creature>> toRemove;
+		for (const auto &spec : spectators) {
+			if (!spec->isInSameInstance(creature)) {
+				toRemove.push_back(spec);
+			}
+		}
+		for (const auto &spec : toRemove) {
+			spectators.erase(spec);
+		}
+	}
+
 	const auto playersSpectators = spectators.filter<Player>();
 
 	std::vector<int32_t> oldStackPosVector;

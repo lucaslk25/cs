@@ -191,6 +191,7 @@ function goshnarGreedEntrance.onStepIn(creature, item, position, fromPosition)
 end
 
 goshnarGreedEntrance:position(SoulWarQuest.goshnarsGreedAccessPosition.from)
+registerScriptTeleport(SoulWarQuest.goshnarsGreedAccessPosition.from, SoulWarQuest.goshnarsGreedAccessPosition.to)
 goshnarGreedEntrance:register()
 
 local greedMonsterDeath = CreatureEvent("GreedMonsterDeath")
@@ -476,6 +477,7 @@ end
 
 for _, pos in pairs(SoulWarQuest.ebbAndFlowBoatTeleportPositions) do
 	ebbAndFlowBoatTeleports:position(pos.register)
+	registerScriptTeleport(pos.register, pos.teleportTo)
 end
 ebbAndFlowBoatTeleports:register()
 
@@ -550,6 +552,7 @@ function goshnarsHatredAccess.onUse(player, item, fromPosition, target, toPositi
 end
 
 goshnarsHatredAccess:position(SoulWarQuest.goshnarsHatredAccessPosition.from)
+registerScriptTeleport(SoulWarQuest.goshnarsHatredAccessPosition.from, SoulWarQuest.goshnarsHatredAccessPosition.to)
 goshnarsHatredAccess:register()
 
 local goshnarsHatredSorrow = Action()
@@ -778,6 +781,7 @@ end
 
 for _, positions in pairs(SoulWarQuest.goshnarsCrueltyTeleportRoomPositions) do
 	pulsatingEnergyTeleportAccess:position(positions.from)
+	registerScriptTeleport(positions.from, positions.to)
 end
 
 pulsatingEnergyTeleportAccess:register()

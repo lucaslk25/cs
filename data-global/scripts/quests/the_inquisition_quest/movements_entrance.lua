@@ -51,6 +51,7 @@ end
 entrance:type("stepin")
 for i = 1, #config do
 	entrance:position(Position(config[i].position.x, config[i].position.y, config[i].position.z))
+	registerScriptTeleport(config[i].position, config[i].destination)
 end
 
 entrance:register()

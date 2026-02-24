@@ -35,6 +35,16 @@
 static constexpr int32_t MONSTER_MINSPAWN_INTERVAL = 1000; // 1 second
 static constexpr int32_t MONSTER_MAXSPAWN_INTERVAL = 86400000; // 1 day
 
+std::shared_ptr<SpawnMonster> SpawnMonster::cloneForInstance(uint32_t instanceId) const {
+	auto clone = std::make_shared<SpawnMonster>(centerPos, radius);
+	clone->m_instanceId = instanceId;
+	clone->interval = interval;
+	clone->spawnMonsterMap = spawnMonsterMap; // Copy spawn definitions
+	// spawnedMonsterMap intentionally empty — no live monsters yet
+	// checkSpawnMonsterEvent intentionally 0 — startup() will set it
+	return clone;
+}
+
 bool SpawnsMonster::loadFromXML(const std::string &filemonstername) {
 	if (isLoaded()) {
 		return true;
@@ -232,13 +242,15 @@ bool SpawnMonster::spawnMonster(uint32_t spawnMonsterId, spawnBlock_t &sb, const
 		return false;
 	}
 	auto monster = std::make_shared<Monster>(monsterType);
-	if (startup) {
-		// No need to send out events to the surrounding since there is no one out there to listen!
+	// Instance System: set instanceId before placement so visibility filtering works correctly
+	monster->setInstanceID(m_instanceId);
+	if (startup && m_instanceId == 1) {
+		// Global startup: no players online yet, skip sending packets
 		if (!g_game().internalPlaceCreature(monster, sb.pos, true)) {
 			return false;
 		}
 	} else {
-		g_logger().trace("[SpawnMonster] Spawning {} at {}", monsterType->name, sb.pos.toString());
+		// Instance spawn or normal respawn: use placeCreature to send appearance to nearby players
 		if (!g_game().placeCreature(monster, sb.pos, false, true)) {
 			return false;
 		}

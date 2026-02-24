@@ -433,5 +433,10 @@ class PlayerFunctions {
 
 	static int luaPlayerDropConnection(lua_State* L);
 
+	// Instance System
+	static int luaPlayerGetInstanceId(lua_State* L);
+	static int luaPlayerSetInstanceId(lua_State* L);
+	static int luaPlayerChangeInstance(lua_State* L);
+
 	friend class CreatureFunctions;
 };

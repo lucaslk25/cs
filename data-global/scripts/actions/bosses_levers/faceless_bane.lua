@@ -3,6 +3,8 @@ local config = {
 		name = "Faceless Bane",
 		position = Position(33617, 32561, 13),
 	},
+	instanced = true,
+	maxInstances = 5,
 	requiredLevel = 250,
 	timeToDefeat = 15 * 60,
 	playerPositions = {

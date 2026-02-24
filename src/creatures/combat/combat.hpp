@@ -256,7 +256,7 @@ public:
 	bool doCombatChain(const std::shared_ptr<Creature> &caster, const std::shared_ptr<Creature> &target, bool aggressive) const;
 
 private:
-	static void doChainEffect(const Position &origin, const Position &pos, uint8_t effect);
+	static void doChainEffect(const Position &origin, const Position &pos, uint8_t effect, uint32_t instanceId = 0);
 	static std::vector<std::pair<Position, std::vector<uint32_t>>> pickChainTargets(const std::shared_ptr<Creature> &caster, const CombatParams &params, uint8_t chainDistance, uint8_t maxTargets, bool aggressive, bool backtracking, const std::shared_ptr<Creature> &initialTarget = nullptr);
 	static bool isValidChainTarget(const std::shared_ptr<Creature> &caster, const std::shared_ptr<Creature> &currentTarget, const std::shared_ptr<Creature> &potentialTarget, const CombatParams &params, bool aggressive);
 

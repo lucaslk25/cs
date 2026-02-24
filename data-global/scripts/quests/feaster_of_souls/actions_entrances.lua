@@ -36,6 +36,7 @@ end
 
 for index, value in pairs(positions) do
 	feasterEntrances:position(value.position)
+	registerScriptTeleport(value.position, value.destination)
 end
 
 feasterEntrances:register()

@@ -1242,7 +1242,7 @@ void EventCallback::zoneAfterCreatureEnter(const std::shared_ptr<Zone> &zone, co
 	getScriptInterface()->callVoidFunction(2);
 }
 
-void EventCallback::zoneAfterCreatureLeave(const std::shared_ptr<Zone> &zone, const std::shared_ptr<Creature> &creature) const {
+void EventCallback::zoneAfterCreatureLeave(const std::shared_ptr<Zone> &zone, const std::shared_ptr<Creature> &creature, bool isLogout) const {
 	if (!LuaScriptInterface::reserveScriptEnv()) {
 		g_logger().error("[EventCallback::zoneAfterCreatureLeave - "
 		                 "Zone {} Creature {}] "
@@ -1263,7 +1263,9 @@ void EventCallback::zoneAfterCreatureLeave(const std::shared_ptr<Zone> &zone, co
 	LuaScriptInterface::pushUserdata<Creature>(L, creature);
 	LuaScriptInterface::setCreatureMetatable(L, -1, creature);
 
-	getScriptInterface()->callVoidFunction(2);
+	LuaScriptInterface::pushBoolean(L, isLogout);
+
+	getScriptInterface()->callVoidFunction(3);
 }
 
 void EventCallback::mapOnLoad(const std::string &mapFullPath) const {

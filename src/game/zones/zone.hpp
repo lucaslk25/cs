@@ -21,6 +21,8 @@
 #include "items/item.hpp"
 #include "creatures/creature.hpp"
 
+#include <set>
+
 class Tile;
 class Creature;
 class Monster;
@@ -28,6 +30,18 @@ class Player;
 class Npc;
 class Item;
 class Thing;
+
+struct FloodFillResult {
+	uint32_t tilesAdded = 0;
+	std::set<uint8_t> zLevels;
+	std::vector<Position> entryTiles;
+	std::vector<std::pair<Position, Position>> teleportEntries;
+	std::vector<std::pair<Position, Position>> internalTeleports;
+	std::vector<std::pair<Position, Position>> exitTeleports;
+	uint32_t spawnCount = 0;
+	Position bboxMin;
+	Position bboxMax;
+};
 
 struct Area {
 	constexpr Area() = default;
@@ -165,6 +179,7 @@ public:
 	}
 	void addArea(Area area);
 	void subtractArea(Area area);
+	FloodFillResult buildFromFloodFill(const Position &startPos, uint32_t maxTiles = 5000);
 	void addPosition(const Position &position) {
 		positions.emplace(position);
 	}
@@ -218,9 +233,9 @@ public:
 
 	static bool loadFromXML(const std::string &fileName, uint16_t shiftID = 0);
 
-protected:
 	bool contains(const Position &position) const;
 
+protected:
 	Position removeDestination = Position();
 	std::string name;
 	std::string monsterVariant;

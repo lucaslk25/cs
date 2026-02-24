@@ -468,6 +468,14 @@ uint32_t MoveEvent::StepInField(const std::shared_ptr<Creature> &creature, const
 
 	const auto &field = item->getMagicField();
 	if (field) {
+		const auto *attr = item->getCustomAttribute("instanceid");
+		if (attr) {
+			uint32_t fieldInstanceId = static_cast<uint32_t>(attr->getAttribute<int64_t>());
+			if (fieldInstanceId != 0 && fieldInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL
+				&& creature->getInstanceID() != fieldInstanceId) {
+				return 1;
+			}
+		}
 		field->onStepInField(creature);
 		return 1;
 	}
@@ -496,10 +504,22 @@ uint32_t MoveEvent::AddItemField(const std::shared_ptr<Item> &item, const std::s
 			g_logger().debug("[MoveEvent::AddItemField] - Creatures is nullptr");
 			return 0;
 		}
+
+		uint32_t fieldInstanceId = 0;
+		const auto *attr = item->getCustomAttribute("instanceid");
+		if (attr) {
+			fieldInstanceId = static_cast<uint32_t>(attr->getAttribute<int64_t>());
+		}
+
 		for (auto &creature : *creatures) {
 			if (field == nullptr) {
 				g_logger().debug("[MoveEvent::AddItemField] - MagicField is nullptr");
 				return 0;
+			}
+
+			if (fieldInstanceId != 0 && fieldInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL
+				&& creature->getInstanceID() != fieldInstanceId) {
+				continue;
 			}
 
 			field->onStepInField(creature);

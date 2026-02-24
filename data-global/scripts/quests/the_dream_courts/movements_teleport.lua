@@ -35,5 +35,6 @@ end
 
 for index, teleportItem in pairs(teleports) do
 	teleport:position(teleportItem.from)
+	registerScriptTeleport(teleportItem.from, teleportItem.to)
 end
 teleport:register()

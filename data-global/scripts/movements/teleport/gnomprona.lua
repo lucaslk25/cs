@@ -48,9 +48,11 @@ end
 for a = 1, #teleports do
 	if teleports[a].position then
 		gnomprona:position(teleports[a].position)
+		registerScriptTeleport(teleports[a].position, teleports[a].destination)
 	elseif teleports[a].positions then
 		for b = 1, #teleports[a].positions do
 			gnomprona:position(teleports[a].positions[b])
+			registerScriptTeleport(teleports[a].positions[b], teleports[a].destination)
 		end
 	end
 end

@@ -57,6 +57,17 @@ public:
 	uint32_t getInterval() const {
 		return interval;
 	}
+
+	uint32_t getInstanceID() const {
+		return m_instanceId;
+	}
+	void setInstanceID(uint32_t id) {
+		m_instanceId = id;
+	}
+
+	// Create a clone of this spawn for a specific instance (copies spawn definitions, not live monsters)
+	std::shared_ptr<SpawnMonster> cloneForInstance(uint32_t instanceId) const;
+
 	void startup(bool delayed = false);
 
 	void startSpawnMonsterCheck();
@@ -66,6 +77,14 @@ public:
 	void cleanup();
 
 	const Position &getCenterPos() const;
+
+	int32_t getRadius() const {
+		return radius;
+	}
+
+	const std::map<uint32_t, spawnBlock_t> &getSpawnMonsterMap() const {
+		return spawnMonsterMap;
+	}
 
 	void setMonsterVariant(const std::string &variant);
 
@@ -78,6 +97,7 @@ private:
 	int32_t radius;
 	uint32_t interval = 30000;
 	uint32_t checkSpawnMonsterEvent = 0;
+	uint32_t m_instanceId = 1; // 1 = global, 2+ = private instance
 
 	static bool findPlayer(const Position &pos);
 	bool spawnMonster(uint32_t spawnMonsterId, spawnBlock_t &sb, const std::shared_ptr<MonsterType> &monsterType, bool startup = false);

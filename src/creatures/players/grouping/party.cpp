@@ -204,7 +204,9 @@ bool Party::leaveParty(const std::shared_ptr<Player> &player, bool forceRemove /
 	for (const auto &member : getMembers()) {
 		member->sendCreatureSkull(player);
 		player->sendPlayerPartyIcons(member);
-		member->sendPartyCreatureUpdate(player);
+		if (member->isInSameInstance(player)) {
+			member->sendPartyCreatureUpdate(player);
+		}
 		g_game().updatePlayerHelpers(member);
 	}
 
@@ -225,7 +227,9 @@ bool Party::leaveParty(const std::shared_ptr<Player> &player, bool forceRemove /
 	player->sendCreatureSkull(player);
 	leader->sendCreatureSkull(player);
 	player->sendPlayerPartyIcons(leader);
-	leader->sendPartyCreatureUpdate(player);
+	if (leader->isInSameInstance(player)) {
+		leader->sendPartyCreatureUpdate(player);
+	}
 
 	return true;
 }
@@ -668,6 +672,9 @@ bool Party::canOpenCorpse(uint32_t ownerId) const {
 }
 
 void Party::showPlayerStatus(const std::shared_ptr<Player> &player, const std::shared_ptr<Player> &member, bool showStatus) const {
+	if (!player->isInSameInstance(member)) {
+		return;
+	}
 	player->sendPartyCreatureShowStatus(member, showStatus);
 	member->sendPartyCreatureShowStatus(player, showStatus);
 	if (showStatus) {
@@ -754,15 +761,20 @@ void Party::updatePlayerHealth(const std::shared_ptr<Player> &player, const std:
 	const auto playerPosition = player->getPosition();
 	const auto leaderPosition = leader->getPosition();
 	for (const auto &member : getMembers()) {
+		if (!member->isInSameInstance(target)) {
+			continue;
+		}
 		auto memberPosition = member->getPosition();
 		const bool condition = (maxDistance == 0 || (Position::getDistanceX(playerPosition, memberPosition) <= maxDistance && Position::getDistanceY(playerPosition, memberPosition) <= maxDistance));
 		if (condition) {
 			member->sendPartyCreatureHealth(target, healthPercent);
 		}
 	}
-	const bool condition = (maxDistance == 0 || (Position::getDistanceX(playerPosition, leaderPosition) <= maxDistance && Position::getDistanceY(playerPosition, leaderPosition) <= maxDistance));
-	if (condition) {
-		leader->sendPartyCreatureHealth(target, healthPercent);
+	if (leader->isInSameInstance(target)) {
+		const bool condition = (maxDistance == 0 || (Position::getDistanceX(playerPosition, leaderPosition) <= maxDistance && Position::getDistanceY(playerPosition, leaderPosition) <= maxDistance));
+		if (condition) {
+			leader->sendPartyCreatureHealth(target, healthPercent);
+		}
 	}
 }
 
@@ -774,14 +786,19 @@ void Party::updatePlayerMana(const std::shared_ptr<Player> &player, uint8_t mana
 
 	const int32_t maxDistance = g_configManager().getNumber(PARTY_LIST_MAX_DISTANCE);
 	for (const auto &member : getMembers()) {
+		if (!member->isInSameInstance(player)) {
+			continue;
+		}
 		const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), member->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), member->getPosition()) <= maxDistance));
 		if (condition) {
 			member->sendPartyPlayerMana(player, manaPercent);
 		}
 	}
-	const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), leader->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), leader->getPosition()) <= maxDistance));
-	if (condition) {
-		leader->sendPartyPlayerMana(player, manaPercent);
+	if (leader->isInSameInstance(player)) {
+		const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), leader->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), leader->getPosition()) <= maxDistance));
+		if (condition) {
+			leader->sendPartyPlayerMana(player, manaPercent);
+		}
 	}
 }
 
@@ -793,14 +810,19 @@ void Party::updatePlayerVocation(const std::shared_ptr<Player> &player) {
 
 	const int32_t maxDistance = g_configManager().getNumber(PARTY_LIST_MAX_DISTANCE);
 	for (const auto &member : getMembers()) {
+		if (!member->isInSameInstance(player)) {
+			continue;
+		}
 		const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), member->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), member->getPosition()) <= maxDistance));
 		if (condition) {
 			member->sendPartyPlayerVocation(player);
 		}
 	}
-	const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), leader->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), leader->getPosition()) <= maxDistance));
-	if (condition) {
-		leader->sendPartyPlayerVocation(player);
+	if (leader->isInSameInstance(player)) {
+		const bool condition = (maxDistance == 0 || (Position::getDistanceX(player->getPosition(), leader->getPosition()) <= maxDistance && Position::getDistanceY(player->getPosition(), leader->getPosition()) <= maxDistance));
+		if (condition) {
+			leader->sendPartyPlayerVocation(player);
+		}
 	}
 }
 

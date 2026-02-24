@@ -25,7 +25,9 @@
 #include "creatures/players/player.hpp"
 #include "game/functions/game_reload.hpp"
 #include "game/game.hpp"
+#include "game/instances/instance_manager.hpp"
 #include "game/scheduling/dispatcher.hpp"
+#include "game/zones/zone.hpp"
 #include "io/io_bosstiary.hpp"
 #include "io/iobestiary.hpp"
 #include "items/item.hpp"
@@ -37,6 +39,9 @@
 #include "lua/functions/events/event_callback_functions.hpp"
 #include "lua/scripts/lua_environment.hpp"
 #include "map/spectators.hpp"
+#include "map/mapcache.hpp"
+#include "items/tile.hpp"
+#include "game/movement/teleport.hpp"
 #include "lua/functions/lua_functions_loader.hpp"
 
 void GameFunctions::init(lua_State* L) {
@@ -137,6 +142,23 @@ void GameFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Game", "setRankName", GameFunctions::luaGameSetRankName);
 	Lua::registerMethod(L, "Game", "createGuild", GameFunctions::luaGameCreateGuild);
 	Lua::registerMethod(L, "Game", "joinGuild", GameFunctions::luaGameJoinGuild);
+
+	// Instance System
+	Lua::registerMethod(L, "Game", "createInstance", GameFunctions::luaGameCreateInstance);
+	Lua::registerMethod(L, "Game", "destroyInstance", GameFunctions::luaGameDestroyInstance);
+	Lua::registerMethod(L, "Game", "createInstanceMonster", GameFunctions::luaGameCreateInstanceMonster);
+	Lua::registerMethod(L, "Game", "populateInstanceFromMap", GameFunctions::luaGamePopulateInstanceFromMap);
+	Lua::registerMethod(L, "Game", "populateInstanceFromZone", GameFunctions::luaGamePopulateInstanceFromZone);
+	Lua::registerMethod(L, "Game", "trackInstancePlayer", GameFunctions::luaGameTrackInstancePlayer);
+	Lua::registerMethod(L, "Game", "untrackInstancePlayer", GameFunctions::luaGameUntrackInstancePlayer);
+	Lua::registerMethod(L, "Game", "findInstanceByPlayerGuid", GameFunctions::luaGameFindInstanceByPlayerGuid);
+
+	// Spawn Query System
+	Lua::registerMethod(L, "Game", "getSpawnsInArea", GameFunctions::luaGameGetSpawnsInArea);
+	Lua::registerMethod(L, "Game", "discoverSpawnClusters", GameFunctions::luaGameDiscoverSpawnClusters);
+
+	// Teleport Query System
+	Lua::registerMethod(L, "Game", "findTeleportsToArea", GameFunctions::luaGameFindTeleportsToArea);
 }
 
 // Game
@@ -1280,5 +1302,604 @@ int GameFunctions::luaGameJoinGuild(lua_State* L) {
 
 	bool success = g_game().joinGuild(guildName, playerName);
 	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+// === Instance System Lua Bindings ===
+
+int GameFunctions::luaGameCreateInstance(lua_State* L) {
+	// Game.createInstance([owner])
+	// Creates a new instance and returns its ID.
+	// Optional: pass a player as owner.
+	std::shared_ptr<Player> owner = nullptr;
+	if (lua_gettop(L) >= 1 && !lua_isnil(L, 1)) {
+		owner = Lua::getUserdataShared<Player>(L, 1);
+	}
+	uint32_t instanceId = g_instanceManager().createInstance(owner);
+	lua_pushnumber(L, instanceId);
+	return 1;
+}
+
+int GameFunctions::luaGameDestroyInstance(lua_State* L) {
+	// Game.destroyInstance(instanceId)
+	// Destroys an existing instance.
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 1);
+	bool success = g_instanceManager().destroyInstance(instanceId);
+	Lua::pushBoolean(L, success);
+	return 1;
+}
+
+int GameFunctions::luaGameCreateInstanceMonster(lua_State* L) {
+	// Game.createInstanceMonster(monsterName, position, instanceId[, extended[, force]])
+	// Creates a monster and assigns it to the specified instance.
+	const std::string &monsterName = Lua::getString(L, 1);
+	const Position &pos = Lua::getPosition(L, 2);
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 3);
+	bool extended = Lua::getBoolean(L, 4, false);
+	bool force = Lua::getBoolean(L, 5, false);
+
+	auto monster = Monster::createMonster(monsterName);
+	if (!monster) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	monster->setInstanceID(instanceId);
+
+	if (!g_game().placeCreature(monster, pos, extended, force)) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	Lua::pushUserdata<Monster>(L, monster);
+	Lua::setMetatable(L, -1, "Monster");
+	return 1;
+}
+
+int GameFunctions::luaGamePopulateInstanceFromMap(lua_State* L) {
+	// Game.populateInstanceFromMap(instanceId, position, width, height)
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 1);
+	const Position &pos = Lua::getPosition(L, 2);
+	uint16_t width = Lua::getNumber<uint16_t>(L, 3);
+	uint16_t height = Lua::getNumber<uint16_t>(L, 4);
+
+	uint32_t count = g_instanceManager().populateFromMap(instanceId, pos, width, height);
+	lua_pushnumber(L, count);
+	return 1;
+}
+
+int GameFunctions::luaGamePopulateInstanceFromZone(lua_State* L) {
+	// Game.populateInstanceFromZone(instanceId, zone)
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 1);
+	const auto &zone = Lua::getUserdataShared<Zone>(L, 2);
+	if (!zone) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_ZONE_NOT_FOUND));
+		lua_pushnumber(L, 0);
+		return 1;
+	}
+	uint32_t count = g_instanceManager().populateFromZone(instanceId, zone);
+	lua_pushnumber(L, count);
+	return 1;
+}
+
+int GameFunctions::luaGameTrackInstancePlayer(lua_State* L) {
+	// Game.trackInstancePlayer(playerGuid, instanceId)
+	uint32_t playerGuid = Lua::getNumber<uint32_t>(L, 1);
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 2);
+	g_instanceManager().trackPlayerInstance(playerGuid, instanceId);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int GameFunctions::luaGameUntrackInstancePlayer(lua_State* L) {
+	// Game.untrackInstancePlayer(playerGuid)
+	uint32_t playerGuid = Lua::getNumber<uint32_t>(L, 1);
+	g_instanceManager().untrackPlayerInstance(playerGuid);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int GameFunctions::luaGameFindInstanceByPlayerGuid(lua_State* L) {
+	// Game.findInstanceByPlayerGuid(playerGuid)
+	// Returns instanceId or 0 if not found/instance no longer exists
+	uint32_t playerGuid = Lua::getNumber<uint32_t>(L, 1);
+	uint32_t instanceId = g_instanceManager().findInstanceByPlayerGuid(playerGuid);
+	lua_pushnumber(L, instanceId);
+	return 1;
+}
+
+// === Spawn Query System ===
+
+int GameFunctions::luaGameGetSpawnsInArea(lua_State* L) {
+	// Game.getSpawnsInArea(fromPos, toPos)
+	// Returns table of {name, x, y, z, spawntime} for each individual spawn in the area
+	const Position &fromPos = Lua::getPosition(L, 1);
+	const Position &toPos = Lua::getPosition(L, 2);
+
+	lua_newtable(L);
+	int index = 1;
+
+	auto processSpawnList = [&](std::vector<std::shared_ptr<SpawnMonster>> &spawnList) {
+		for (const auto &spawn : spawnList) {
+			const auto &center = spawn->getCenterPos();
+			bool inArea = (center.x >= fromPos.x && center.x <= toPos.x
+				&& center.y >= fromPos.y && center.y <= toPos.y
+				&& center.z >= fromPos.z && center.z <= toPos.z);
+			if (!inArea) {
+				for (const auto &[id, block] : spawn->getSpawnMonsterMap()) {
+					if (block.pos.x >= fromPos.x && block.pos.x <= toPos.x
+						&& block.pos.y >= fromPos.y && block.pos.y <= toPos.y
+						&& block.pos.z >= fromPos.z && block.pos.z <= toPos.z) {
+						inArea = true;
+						break;
+					}
+				}
+			}
+			if (!inArea) {
+				continue;
+			}
+			for (const auto &[id, block] : spawn->getSpawnMonsterMap()) {
+				for (const auto &[monsterType, weight] : block.monsterTypes) {
+					lua_createtable(L, 0, 5);
+
+					Lua::pushString(L, monsterType->name);
+					lua_setfield(L, -2, "name");
+
+					lua_pushnumber(L, block.pos.x);
+					lua_setfield(L, -2, "x");
+					lua_pushnumber(L, block.pos.y);
+					lua_setfield(L, -2, "y");
+					lua_pushnumber(L, block.pos.z);
+					lua_setfield(L, -2, "z");
+
+					lua_pushnumber(L, static_cast<lua_Number>(block.interval) / 1000);
+					lua_setfield(L, -2, "spawntime");
+
+					lua_rawseti(L, -2, index++);
+				}
+			}
+		}
+	};
+
+	processSpawnList(g_game().map.spawnsMonster.getspawnMonsterList());
+	for (int i = 0; i < 50; i++) {
+		processSpawnList(g_game().map.spawnsMonsterCustomMaps[i].getspawnMonsterList());
+	}
+
+	return 1;
+}
+
+int GameFunctions::luaGameDiscoverSpawnClusters(lua_State* L) {
+	// Game.discoverSpawnClusters(minZ, maxZ[, filterName])
+	// Returns table of clusters: {fromPos, toPos, spawns, zLevels, monsters}
+	uint8_t minZ = Lua::getNumber<uint8_t>(L, 1);
+	uint8_t maxZ = Lua::getNumber<uint8_t>(L, 2);
+	std::string filterName = Lua::getString(L, 3, "");
+
+	bool hasFilter = !filterName.empty();
+	std::string filterLower = filterName;
+	if (hasFilter) {
+		std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
+	}
+
+	// Grid cell size for clustering
+	constexpr int CELL_SIZE = 30;
+
+	// Key: (cellX, cellY, z) -> list of spawn data
+	struct SpawnEntry {
+		Position pos;
+		std::string name;
+	};
+
+	struct CellKey {
+		int cellX;
+		int cellY;
+		uint8_t z;
+		bool operator==(const CellKey &o) const {
+			return cellX == o.cellX && cellY == o.cellY && z == o.z;
+		}
+	};
+
+	struct CellKeyHash {
+		size_t operator()(const CellKey &k) const {
+			size_t h = std::hash<int>()(k.cellX);
+			h ^= std::hash<int>()(k.cellY) + 0x9e3779b9 + (h << 6) + (h >> 2);
+			h ^= std::hash<uint8_t>()(k.z) + 0x9e3779b9 + (h << 6) + (h >> 2);
+			return h;
+		}
+	};
+
+	std::unordered_map<CellKey, std::vector<SpawnEntry>, CellKeyHash> grid;
+
+	auto processSpawnList = [&](std::vector<std::shared_ptr<SpawnMonster>> &spawnList) {
+		for (const auto &spawn : spawnList) {
+			const auto &center = spawn->getCenterPos();
+			if (center.z < minZ || center.z > maxZ) {
+				continue;
+			}
+			for (const auto &[id, block] : spawn->getSpawnMonsterMap()) {
+				for (const auto &[monsterType, weight] : block.monsterTypes) {
+					if (hasFilter) {
+						std::string nameLower = monsterType->name;
+						std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+						if (nameLower.find(filterLower) == std::string::npos) {
+							continue;
+						}
+					}
+					CellKey key { static_cast<int>(block.pos.x) / CELL_SIZE,
+						static_cast<int>(block.pos.y) / CELL_SIZE,
+						block.pos.z };
+					grid[key].push_back({ block.pos, monsterType->name });
+				}
+			}
+		}
+	};
+
+	processSpawnList(g_game().map.spawnsMonster.getspawnMonsterList());
+	for (int i = 0; i < 50; i++) {
+		processSpawnList(g_game().map.spawnsMonsterCustomMaps[i].getspawnMonsterList());
+	}
+
+	// Flood-fill to merge adjacent cells into clusters
+	std::unordered_set<CellKey, CellKeyHash> visited;
+
+	struct Cluster {
+		uint16_t minX = 65535, minY = 65535, maxX = 0, maxY = 0;
+		uint8_t minClusterZ = 15, maxClusterZ = 0;
+		std::unordered_map<std::string, uint32_t> monsterCounts;
+		uint32_t totalSpawns = 0;
+		std::set<uint8_t> zLevels;
+		std::vector<Position> spawnPositions;
+		Position centerSpawnPos;
+	};
+
+	std::vector<Cluster> clusters;
+
+	for (auto &[cellKey, entries] : grid) {
+		if (visited.count(cellKey)) {
+			continue;
+		}
+
+		Cluster cluster;
+		std::queue<CellKey> queue;
+		queue.push(cellKey);
+		visited.insert(cellKey);
+
+		while (!queue.empty()) {
+			auto current = queue.front();
+			queue.pop();
+
+			auto it = grid.find(current);
+			if (it == grid.end()) {
+				continue;
+			}
+
+			for (const auto &entry : it->second) {
+				if (entry.pos.x < cluster.minX) {
+					cluster.minX = entry.pos.x;
+				}
+				if (entry.pos.y < cluster.minY) {
+					cluster.minY = entry.pos.y;
+				}
+				if (entry.pos.x > cluster.maxX) {
+					cluster.maxX = entry.pos.x;
+				}
+				if (entry.pos.y > cluster.maxY) {
+					cluster.maxY = entry.pos.y;
+				}
+				if (entry.pos.z < cluster.minClusterZ) {
+					cluster.minClusterZ = entry.pos.z;
+				}
+				if (entry.pos.z > cluster.maxClusterZ) {
+					cluster.maxClusterZ = entry.pos.z;
+				}
+				cluster.monsterCounts[entry.name]++;
+				cluster.totalSpawns++;
+				cluster.zLevels.insert(entry.pos.z);
+				cluster.spawnPositions.push_back(entry.pos);
+			}
+
+			// Check 8 horizontal neighbors (same z-level only)
+			for (int dx = -1; dx <= 1; dx++) {
+				for (int dy = -1; dy <= 1; dy++) {
+					if (dx == 0 && dy == 0) {
+						continue;
+					}
+					CellKey neighbor { current.cellX + dx, current.cellY + dy, current.z };
+					if (!visited.count(neighbor) && grid.count(neighbor)) {
+						visited.insert(neighbor);
+						queue.push(neighbor);
+					}
+				}
+			}
+		}
+
+		if (cluster.totalSpawns >= 3) {
+			double cx = (cluster.minX + cluster.maxX) / 2.0;
+			double cy = (cluster.minY + cluster.maxY) / 2.0;
+			double bestDist = std::numeric_limits<double>::max();
+			for (const auto &pos : cluster.spawnPositions) {
+				double dx = pos.x - cx;
+				double dy = pos.y - cy;
+				double dist = dx * dx + dy * dy;
+				if (dist < bestDist) {
+					bestDist = dist;
+					cluster.centerSpawnPos = pos;
+				}
+			}
+			cluster.spawnPositions.clear();
+			cluster.spawnPositions.shrink_to_fit();
+			clusters.push_back(std::move(cluster));
+		}
+	}
+
+	// Phase 2: Auto-merge clusters connected by stairs/holes across Z-levels
+	std::vector<size_t> ufParent(clusters.size());
+	std::iota(ufParent.begin(), ufParent.end(), 0);
+	auto findRoot = [&](size_t x) -> size_t {
+		while (ufParent[x] != x) {
+			ufParent[x] = ufParent[ufParent[x]];
+			x = ufParent[x];
+		}
+		return x;
+	};
+	auto unite = [&](size_t a, size_t b) {
+		ufParent[findRoot(b)] = findRoot(a);
+	};
+
+	for (size_t i = 0; i < clusters.size(); i++) {
+		for (size_t j = i + 1; j < clusters.size(); j++) {
+			if (findRoot(i) == findRoot(j)) {
+				continue;
+			}
+			auto &ci = clusters[i];
+			auto &cj = clusters[j];
+
+			bool zAdj = false;
+			uint8_t upperZ = 0, lowerZ = 0;
+			for (uint8_t zi : ci.zLevels) {
+				for (uint8_t zj : cj.zLevels) {
+					if (zi + 1 == zj) {
+						upperZ = zi;
+						lowerZ = zj;
+						zAdj = true;
+					}
+					if (zj + 1 == zi) {
+						upperZ = zj;
+						lowerZ = zi;
+						zAdj = true;
+					}
+					if (zAdj) {
+						break;
+					}
+				}
+				if (zAdj) {
+					break;
+				}
+			}
+			if (!zAdj) {
+				continue;
+			}
+
+			int oMinX = std::max(static_cast<int>(ci.minX), static_cast<int>(cj.minX));
+			int oMaxX = std::min(static_cast<int>(ci.maxX), static_cast<int>(cj.maxX));
+			int oMinY = std::max(static_cast<int>(ci.minY), static_cast<int>(cj.minY));
+			int oMaxY = std::min(static_cast<int>(ci.maxY), static_cast<int>(cj.maxY));
+			if (oMinX > oMaxX || oMinY > oMaxY) {
+				continue;
+			}
+
+			bool connected = false;
+			for (int x = oMinX; x <= oMaxX && !connected; x++) {
+				for (int y = oMinY; y <= oMaxY && !connected; y++) {
+					auto tileUp = g_game().map.getTile(x, y, upperZ);
+					if (tileUp && tileUp->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
+						connected = true;
+						break;
+					}
+					auto tileLow = g_game().map.getTile(x, y, lowerZ);
+					if (tileLow && tileLow->hasFlag(TILESTATE_FLOORCHANGE) && !tileLow->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
+						connected = true;
+						break;
+					}
+				}
+			}
+			if (connected) {
+				unite(i, j);
+			}
+		}
+	}
+
+	// Rebuild merged clusters from union-find groups
+	std::unordered_map<size_t, std::vector<size_t>> ufGroups;
+	for (size_t i = 0; i < clusters.size(); i++) {
+		ufGroups[findRoot(i)].push_back(i);
+	}
+	std::vector<Cluster> mergedClusters;
+	for (auto &[root, members] : ufGroups) {
+		if (members.size() == 1) {
+			mergedClusters.push_back(std::move(clusters[members[0]]));
+		} else {
+			Cluster merged;
+			size_t bestIdx = members[0];
+			for (size_t idx : members) {
+				auto &c = clusters[idx];
+				merged.minX = std::min(merged.minX, c.minX);
+				merged.minY = std::min(merged.minY, c.minY);
+				merged.maxX = std::max(merged.maxX, c.maxX);
+				merged.maxY = std::max(merged.maxY, c.maxY);
+				merged.minClusterZ = std::min(merged.minClusterZ, c.minClusterZ);
+				merged.maxClusterZ = std::max(merged.maxClusterZ, c.maxClusterZ);
+				merged.totalSpawns += c.totalSpawns;
+				for (auto &[name, count] : c.monsterCounts) {
+					merged.monsterCounts[name] += count;
+				}
+				for (uint8_t z : c.zLevels) {
+					merged.zLevels.insert(z);
+				}
+				if (c.totalSpawns > clusters[bestIdx].totalSpawns) {
+					bestIdx = idx;
+				}
+			}
+			merged.centerSpawnPos = clusters[bestIdx].centerSpawnPos;
+			mergedClusters.push_back(std::move(merged));
+		}
+	}
+	clusters = std::move(mergedClusters);
+
+	// Sort by total spawns descending
+	std::sort(clusters.begin(), clusters.end(), [](const Cluster &a, const Cluster &b) {
+		return a.totalSpawns > b.totalSpawns;
+	});
+
+	// Build Lua result table
+	lua_newtable(L);
+	int clusterIdx = 1;
+	for (const auto &cluster : clusters) {
+		lua_createtable(L, 0, 6);
+
+		// fromPos
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, cluster.minX);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, cluster.minY);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, cluster.minClusterZ);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "fromPos");
+
+		// toPos
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, cluster.maxX);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, cluster.maxY);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, cluster.maxClusterZ);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "toPos");
+
+		// centerSpawnPos: actual spawn position closest to geometric center
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, cluster.centerSpawnPos.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, cluster.centerSpawnPos.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, cluster.centerSpawnPos.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "centerSpawnPos");
+
+		// spawns count
+		lua_pushnumber(L, cluster.totalSpawns);
+		lua_setfield(L, -2, "spawns");
+
+		// zLevels array
+		lua_createtable(L, static_cast<int>(cluster.zLevels.size()), 0);
+		int zIdx = 1;
+		for (uint8_t z : cluster.zLevels) {
+			lua_pushnumber(L, z);
+			lua_rawseti(L, -2, zIdx++);
+		}
+		lua_setfield(L, -2, "zLevels");
+
+		// monsters: sorted by count descending
+		std::vector<std::pair<std::string, uint32_t>> sortedMonsters(
+			cluster.monsterCounts.begin(), cluster.monsterCounts.end());
+		std::sort(sortedMonsters.begin(), sortedMonsters.end(),
+			[](const auto &a, const auto &b) { return a.second > b.second; });
+
+		lua_createtable(L, static_cast<int>(sortedMonsters.size()), 0);
+		int mIdx = 1;
+		for (const auto &[name, count] : sortedMonsters) {
+			lua_createtable(L, 0, 2);
+			Lua::pushString(L, name);
+			lua_setfield(L, -2, "name");
+			lua_pushnumber(L, count);
+			lua_setfield(L, -2, "count");
+			lua_rawseti(L, -2, mIdx++);
+		}
+		lua_setfield(L, -2, "monsters");
+
+		lua_rawseti(L, -2, clusterIdx++);
+	}
+
+	return 1;
+}
+
+int GameFunctions::luaGameFindTeleportsToArea(lua_State* L) {
+	// Game.findTeleportsToArea(fromPos, toPos)
+	const Position fromPos = Lua::getPosition(L, 1);
+	const Position toPos = Lua::getPosition(L, 2);
+
+	const uint16_t minX = std::min(fromPos.x, toPos.x);
+	const uint16_t maxX = std::max(fromPos.x, toPos.x);
+	const uint16_t minY = std::min(fromPos.y, toPos.y);
+	const uint16_t maxY = std::max(fromPos.y, toPos.y);
+	const uint8_t minZ = std::min(fromPos.z, toPos.z);
+	const uint8_t maxZ = std::max(fromPos.z, toPos.z);
+
+	struct TeleportEntry {
+		Position source;
+		Position destination;
+	};
+	std::vector<TeleportEntry> results;
+
+	for (auto &[sectorKey, sector] : g_game().map.getMapSectors()) {
+		const uint16_t sectorBaseX = static_cast<uint16_t>((sectorKey & 0xFFFF) * SECTOR_SIZE);
+		const uint16_t sectorBaseY = static_cast<uint16_t>((sectorKey >> 16) * SECTOR_SIZE);
+
+		for (uint8_t z = 0; z < MAP_MAX_LAYERS; ++z) {
+			auto floor = sector.getFloor(z);
+			if (!floor) {
+				continue;
+			}
+			for (uint16_t tx = 0; tx < SECTOR_SIZE; ++tx) {
+				for (uint16_t ty = 0; ty < SECTOR_SIZE; ++ty) {
+					auto tile = floor->getTile(sectorBaseX + tx, sectorBaseY + ty);
+					if (!tile || !tile->hasFlag(TILESTATE_TELEPORT)) {
+						continue;
+					}
+					auto teleport = tile->getTeleportItem();
+					if (!teleport) {
+						continue;
+					}
+					const Position &destPos = teleport->getDestPos();
+					if (destPos.x >= minX && destPos.x <= maxX
+						&& destPos.y >= minY && destPos.y <= maxY
+						&& destPos.z >= minZ && destPos.z <= maxZ) {
+						results.push_back({
+							Position(static_cast<uint16_t>(sectorBaseX + tx), static_cast<uint16_t>(sectorBaseY + ty), z),
+							destPos });
+					}
+				}
+			}
+		}
+	}
+
+	lua_createtable(L, static_cast<int>(results.size()), 0);
+	int idx = 1;
+	for (const auto &entry : results) {
+		lua_createtable(L, 0, 2);
+
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, entry.source.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, entry.source.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, entry.source.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "source");
+
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, entry.destination.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, entry.destination.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, entry.destination.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "destination");
+
+		lua_rawseti(L, -2, idx++);
+	}
+
 	return 1;
 }

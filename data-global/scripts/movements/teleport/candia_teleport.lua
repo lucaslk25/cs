@@ -24,5 +24,6 @@ end
 teleport:type("stepin")
 for value in pairs(config) do
 	teleport:position(config[value].position)
+	registerScriptTeleport(config[value].position, config[value].destination)
 end
 teleport:register()

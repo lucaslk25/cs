@@ -45,6 +45,7 @@ end
 
 for _, entrance in pairs(entrances) do
 	teleportEvent:position(entrance.position)
+	registerScriptTeleport(entrance.position, entrance.destination)
 end
 teleportEvent:register()
 
@@ -98,4 +99,5 @@ function bakragoreEntrance.onUse(player, item, fromPosition, target, toPosition,
 end
 
 bakragoreEntrance:position(entrance.position)
+registerScriptTeleport(entrance.position, entrance.destination)
 bakragoreEntrance:register()

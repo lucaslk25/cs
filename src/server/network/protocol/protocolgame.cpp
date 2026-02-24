@@ -44,6 +44,7 @@
 #include "creatures/players/wheel/player_wheel.hpp"
 #include "enums/player_icons.hpp"
 #include "game/game.hpp"
+#include "game/instances/instance_manager.hpp"
 #include "game/modal_window/modal_window.hpp"
 #include "game/scheduling/dispatcher.hpp"
 #include "game/scheduling/save_manager.hpp"
@@ -699,6 +700,8 @@ void ProtocolGame::login(const std::string &name, uint32_t accountId, OperatingS
 			g_logger().warn("Player {} could not be loaded", player->getName());
 			return;
 		}
+
+		g_instanceManager().untrackPlayerInstance(player->getGUID());
 
 		player->setOperatingSystem(operatingSystem);
 
@@ -1571,6 +1574,15 @@ void ProtocolGame::GetTileDescription(const std::shared_ptr<Tile> &tile, Network
 	const TileItemVector* items = tile->getItemList();
 	if (items) {
 		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+			// Instance System: skip items that belong to a different instance
+			const auto *instanceAttr = (*it)->getCustomAttribute("instanceid");
+			if (instanceAttr) {
+				uint32_t itemInstanceId = static_cast<uint32_t>(instanceAttr->getAttribute<int64_t>());
+				if (itemInstanceId != player->getInstanceID() && itemInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL) {
+					continue;
+				}
+			}
+
 			AddItem(msg, *it);
 
 			count++;
@@ -1615,6 +1627,15 @@ void ProtocolGame::GetTileDescription(const std::shared_ptr<Tile> &tile, Network
 
 	if (items) {
 		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
+			// Instance System: skip items that belong to a different instance
+			const auto *instanceAttr = (*it)->getCustomAttribute("instanceid");
+			if (instanceAttr) {
+				uint32_t itemInstanceId = static_cast<uint32_t>(instanceAttr->getAttribute<int64_t>());
+				if (itemInstanceId != player->getInstanceID() && itemInstanceId != Creature::INSTANCE_VISIBLE_TO_ALL) {
+					continue;
+				}
+			}
+
 			AddItem(msg, *it);
 
 			if (++count == 10) {
@@ -3112,7 +3133,6 @@ void ProtocolGame::sendBestiaryCharms() {
 	msg.addByte(charmList.size());
 	for (const auto &c_type : charmList) {
 		msg.addByte(c_type->id);
-		const auto &charmPoints = c_type->points;
 		if (g_iobestiary().hasCharmUnlockedRuneBit(c_type, player->getUnlockedRunesBit())) {
 			const auto charmTier = player->getCharmTier(c_type->id);
 			msg.addByte(charmTier);
@@ -6991,6 +7011,10 @@ void ProtocolGame::sendPartyCreatureUpdate(const std::shared_ptr<Creature> &targ
 		return;
 	}
 
+	if (!player->isInSameInstance(target)) {
+		return;
+	}
+
 	bool known;
 	uint32_t removedKnown = 0;
 	uint32_t cid = target->getID();
@@ -7405,6 +7429,25 @@ void ProtocolGame::sendAddCreature(const std::shared_ptr<Creature> &creature, co
 }
 
 void ProtocolGame::sendMoveCreature(const std::shared_ptr<Creature> &creature, const Position &newPos, int32_t newStackPos, const Position &oldPos, int32_t oldStackPos, bool teleport) {
+	// Instance System: during instance switch, block ALL creature movements except player itself
+	// This prevents race condition where creature moves are queued before instance switch
+	// but sent after, causing "creature not found" errors on client
+	if (player->needsContextRefresh()) {
+		if (creature != player) {
+			return; // Block all other creature movements during instance transition
+		}
+		// Player's first movement after instance switch - send as map refresh
+		player->setNeedsContextRefresh(false);
+		sendMapDescription(newPos);
+		return;
+	}
+
+	// Instance System: normal filtering (after transition is complete)
+	// Uses isInSameInstance which handles INSTANCE_VISIBLE_TO_ALL (e.g. NPCs visible in all instances)
+	if (creature != player && !player->isInSameInstance(creature)) {
+		return;
+	}
+
 	if (creature == player) {
 		if (oldStackPos >= 10) {
 			sendMapDescription(newPos);
@@ -10499,7 +10542,7 @@ void ProtocolGame::parseWeaponProficiency(NetworkMessage &msg) {
 		}
 
 	} else if (type == WEAPON_PROFICIENCY_RESET_PERKS) {
-		const uint16_t itemId = msg.get<uint16_t>();
+		(void)msg.get<uint16_t>(); // itemId - consumed for protocol alignment
 
 	} else if (type == WEAPON_PROFICIENCY_APPLY_PERKS) {
 		const uint16_t itemId = msg.get<uint16_t>();

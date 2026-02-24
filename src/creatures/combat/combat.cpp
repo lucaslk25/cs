@@ -372,6 +372,11 @@ ReturnValue Combat::canDoCombat(const std::shared_ptr<Creature> &attacker, const
 		return RETURNVALUE_NOERROR;
 	}
 
+	// Instance System: no combat between different instances
+	if (attacker && target && !attacker->isInSameInstance(target)) {
+		return RETURNVALUE_YOUMAYNOTATTACKTHISCREATURE;
+	}
+
 	const auto &targetPlayer = target ? target->getPlayer() : nullptr;
 	if (target) {
 		const std::shared_ptr<Tile> &tile = target->getTile();
@@ -1115,23 +1120,24 @@ void Combat::combatTileEffects(const CreatureVector &spectators, const std::shar
 		const auto &item = Item::CreateItem(itemId);
 		if (caster) {
 			item->setOwner(caster);
+			item->setCustomAttribute("instanceid", static_cast<int64_t>(caster->getInstanceID()));
 		}
 
 		ReturnValue ret = g_game().internalAddItem(tile, item);
 		if (ret == RETURNVALUE_NOERROR) {
 			item->startDecaying();
 
-			// Apply field damage immediately when field is created
 			if (item->isMagicField()) {
 				const auto &magicField = item->getMagicField();
 				if (magicField) {
-					// Get creatures on this tile at the same floor level
 					const Position &tilePos = tile->getPosition();
 					const int32_t fieldZ = tilePos.z;
+					const uint32_t fieldInstanceId = caster ? caster->getInstanceID() : 0;
 
 					if (CreatureVector* creatures = tile->getCreatures()) {
 						for (const auto &creature : *creatures) {
-							if (creature->getPosition().z == fieldZ) {
+							if (creature->getPosition().z == fieldZ
+								&& (fieldInstanceId == 0 || creature->getInstanceID() == fieldInstanceId)) {
 								magicField->onStepInField(creature);
 							}
 						}
@@ -1146,7 +1152,9 @@ void Combat::combatTileEffects(const CreatureVector &spectators, const std::shar
 	}
 
 	if (params.impactEffect != CONST_ME_NONE) {
-		Game::addMagicEffect(spectators, tile->getPosition(), params.impactEffect);
+		// Instance System: pass caster's instanceId to effect so it's only visible in the same instance
+		uint32_t effectInstanceId = caster ? caster->getInstanceID() : 0;
+		g_game().addMagicEffect(spectators, tile->getPosition(), params.impactEffect, effectInstanceId);
 	}
 
 	if (params.soundImpactEffect != SoundEffect_t::SILENCE) {
@@ -1220,11 +1228,12 @@ void Combat::addDistanceEffect(const std::shared_ptr<Creature> &caster, const Po
 	}
 
 	if (effect != CONST_ANI_NONE) {
-		g_game().addDistanceEffect(fromPos, toPos, effect);
+		// Instance System: pass caster's instance ID to isolate distance effects
+		g_game().addDistanceEffect(fromPos, toPos, effect, caster ? caster->getInstanceID() : 0);
 	}
 }
 
-void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t effect) {
+void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t effect, uint32_t instanceId) {
 	if (effect > 0) {
 		std::vector<Direction> dirList;
 
@@ -1236,10 +1245,10 @@ void Combat::doChainEffect(const Position &origin, const Position &dest, uint8_t
 		if (g_game().map.getPathMatching(origin, dirList, FrozenPathingConditionCall(dest), fpp)) {
 			for (const auto &dir : dirList) {
 				pos = getNextPosition(dir, pos);
-				g_game().addMagicEffect(pos, effect);
+				g_game().addMagicEffect(pos, effect, instanceId);
 			}
 		}
-		g_game().addMagicEffect(dest, effect);
+		g_game().addMagicEffect(dest, effect, instanceId);
 	}
 }
 
@@ -1365,7 +1374,7 @@ bool Combat::doCombatChain(const std::shared_ptr<Creature> &caster, const std::s
 			g_dispatcher().scheduleEvent(
 				delay, [combat, caster, nextTarget, from, affected]() {
 					if (combat && caster && nextTarget) {
-						Combat::doChainEffect(from, nextTarget->getPosition(), combat->params.chainEffect);
+						Combat::doChainEffect(from, nextTarget->getPosition(), combat->params.chainEffect, caster ? caster->getInstanceID() : 0);
 						combat->doCombat(caster, nextTarget, from, affected);
 					}
 				},
@@ -1564,7 +1573,12 @@ void Combat::doCombatHealth(const std::shared_ptr<Creature> &caster, const std::
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// Instance System: use target's instanceId for effect visibility
+		uint32_t effectInstanceId = target->getInstanceID();
+		if (effectInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL && caster) {
+			effectInstanceId = caster->getInstanceID();
+		}
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, effectInstanceId);
 	}
 
 	if (target && params.combatType == COMBAT_HEALING && target->getMonster()) {
@@ -1609,7 +1623,12 @@ void Combat::doCombatMana(const std::shared_ptr<Creature> &caster, const std::sh
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// Instance System: use target's instanceId for effect visibility
+		uint32_t effectInstanceId = target->getInstanceID();
+		if (effectInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL && caster) {
+			effectInstanceId = caster->getInstanceID();
+		}
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, effectInstanceId);
 	}
 
 	std::vector<std::shared_ptr<Creature>> affectedTargets;
@@ -1647,7 +1666,12 @@ void Combat::doCombatCondition(const std::shared_ptr<Creature> &caster, const Po
 void Combat::doCombatCondition(const std::shared_ptr<Creature> &caster, const std::shared_ptr<Creature> &target, const CombatParams &params) {
 	bool canCombat = !params.aggressive || (caster != target && Combat::canDoCombat(caster, target, params.aggressive) == RETURNVALUE_NOERROR);
 	if ((caster == target || canCombat) && params.impactEffect != CONST_ME_NONE) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// Instance System: use target's instanceId for effect visibility
+		uint32_t effectInstanceId = target ? target->getInstanceID() : 0;
+		if ((effectInstanceId == 0 || effectInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL) && caster) {
+			effectInstanceId = caster->getInstanceID();
+		}
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, effectInstanceId);
 	}
 
 	if (canCombat) {
@@ -1678,7 +1702,12 @@ void Combat::doCombatDispel(const std::shared_ptr<Creature> &caster, const std::
 	if ((caster && target)
 	    && (caster == target || canCombat)
 	    && (params.impactEffect != CONST_ME_NONE)) {
-		g_game().addMagicEffect(target->getPosition(), params.impactEffect);
+		// Instance System: use target's instanceId for effect visibility
+		uint32_t effectInstanceId = target->getInstanceID();
+		if (effectInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL && caster) {
+			effectInstanceId = caster->getInstanceID();
+		}
+		g_game().addMagicEffect(target->getPosition(), params.impactEffect, effectInstanceId);
 	}
 
 	if (canCombat) {

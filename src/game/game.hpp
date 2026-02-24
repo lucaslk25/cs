@@ -267,8 +267,8 @@ public:
 	void loadPlayersRecord();
 	void checkPlayersRecord();
 
-	void sendSingleSoundEffect(const Position &pos, SoundEffect_t soundId, const std::shared_ptr<Creature> &actor = nullptr);
-	void sendDoubleSoundEffect(const Position &pos, SoundEffect_t mainSoundEffect, SoundEffect_t secondarySoundEffect, const std::shared_ptr<Creature> &actor = nullptr);
+	void sendSingleSoundEffect(const Position &pos, SoundEffect_t soundId, const std::shared_ptr<Creature> &actor = nullptr, uint32_t forceInstanceId = 0);
+	void sendDoubleSoundEffect(const Position &pos, SoundEffect_t mainSoundEffect, SoundEffect_t secondarySoundEffect, const std::shared_ptr<Creature> &actor = nullptr, uint32_t forceInstanceId = 0);
 
 	void setGuildMotd(uint32_t guildId, const std::string &newMotd);
 	void sendGuildMotd(uint32_t playerId, uint32_t guildId);
@@ -544,13 +544,14 @@ public:
 	static void addCreatureHealth(const CreatureVector &spectators, const std::shared_ptr<Creature> &target);
 	void addPlayerMana(const std::shared_ptr<Player> &target);
 	void addPlayerVocation(const std::shared_ptr<Player> &target);
-	void addMagicEffect(const Position &pos, uint16_t effect);
-	static void addMagicEffect(const std::vector<std::shared_ptr<Player>> &players, const Position &pos, uint16_t effect);
-	static void addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect);
-	void removeMagicEffect(const Position &pos, uint16_t effect);
-	static void removeMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect);
-	void addDistanceEffect(const Position &fromPos, const Position &toPos, uint16_t effect);
-	static void addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect);
+	// Instance System: forceInstanceId = 0 auto-detects from tile creatures,
+	// > 0 filters to that specific instance, INSTANCE_VISIBLE_TO_ALL sends to all
+	void addMagicEffect(const Position &pos, uint16_t effect, uint32_t forceInstanceId = 0);
+	static void addMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect, uint32_t forceInstanceId = 0);
+	void removeMagicEffect(const Position &pos, uint16_t effect, uint32_t forceInstanceId = 0);
+	static void removeMagicEffect(const CreatureVector &spectators, const Position &pos, uint16_t effect, uint32_t forceInstanceId = 0);
+	void addDistanceEffect(const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t forceInstanceId = 0);
+	static void addDistanceEffect(const CreatureVector &spectators, const Position &fromPos, const Position &toPos, uint16_t effect, uint32_t forceInstanceId = 0);
 
 	void startDecay(const std::shared_ptr<Item> &item);
 	void stopDecay(const std::shared_ptr<Item> &item);
@@ -731,7 +732,7 @@ public:
 	std::shared_ptr<Container> findManagedContainer(const std::shared_ptr<Player> &player, bool &fallbackConsumed, ObjectCategory_t category, bool isLootContainer);
 
 	ReturnValue beforeCreatureZoneChange(const std::shared_ptr<Creature> &creature, const std::unordered_set<std::shared_ptr<Zone>> &fromZones, const std::unordered_set<std::shared_ptr<Zone>> &toZones, bool force = false) const;
-	void afterCreatureZoneChange(const std::shared_ptr<Creature> &creature, const std::unordered_set<std::shared_ptr<Zone>> &fromZones, const std::unordered_set<std::shared_ptr<Zone>> &toZones) const;
+	void afterCreatureZoneChange(const std::shared_ptr<Creature> &creature, const std::unordered_set<std::shared_ptr<Zone>> &fromZones, const std::unordered_set<std::shared_ptr<Zone>> &toZones, bool isLogout = false) const;
 
 	std::unique_ptr<IOWheel> &getIOWheel();
 	const std::unique_ptr<IOWheel> &getIOWheel() const;

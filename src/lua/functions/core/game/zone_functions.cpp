@@ -28,6 +28,8 @@ void ZoneFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Zone", "getName", ZoneFunctions::luaZoneGetName);
 	Lua::registerMethod(L, "Zone", "addArea", ZoneFunctions::luaZoneAddArea);
 	Lua::registerMethod(L, "Zone", "subtractArea", ZoneFunctions::luaZoneSubtractArea);
+	Lua::registerMethod(L, "Zone", "buildFromFloodFill", ZoneFunctions::luaZoneBuildFromFloodFill);
+	Lua::registerMethod(L, "Zone", "contains", ZoneFunctions::luaZoneContains);
 	Lua::registerMethod(L, "Zone", "getRemoveDestination", ZoneFunctions::luaZoneGetRemoveDestination);
 	Lua::registerMethod(L, "Zone", "setRemoveDestination", ZoneFunctions::luaZoneSetRemoveDestination);
 	Lua::registerMethod(L, "Zone", "getPositions", ZoneFunctions::luaZoneGetPositions);
@@ -122,6 +124,161 @@ int ZoneFunctions::luaZoneSubtractArea(lua_State* L) {
 	const auto area = Area(fromPos, toPos);
 	zone->subtractArea(area);
 	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int ZoneFunctions::luaZoneBuildFromFloodFill(lua_State* L) {
+	// Zone:buildFromFloodFill(startPos[, maxTiles])
+	const auto &zone = Lua::getUserdataShared<Zone>(L, 1);
+	if (!zone) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_ZONE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	const auto startPos = Lua::getPosition(L, 2);
+	uint32_t maxTiles = Lua::getNumber<uint32_t>(L, 3, 5000);
+
+	auto result = zone->buildFromFloodFill(startPos, maxTiles);
+
+	lua_createtable(L, 0, 8);
+
+	lua_pushnumber(L, result.tilesAdded);
+	lua_setfield(L, -2, "tiles");
+
+	lua_pushnumber(L, result.spawnCount);
+	lua_setfield(L, -2, "spawns");
+
+	// bounding box
+	lua_createtable(L, 0, 3);
+	lua_pushnumber(L, result.bboxMin.x);
+	lua_setfield(L, -2, "x");
+	lua_pushnumber(L, result.bboxMin.y);
+	lua_setfield(L, -2, "y");
+	lua_pushnumber(L, result.bboxMin.z);
+	lua_setfield(L, -2, "z");
+	lua_setfield(L, -2, "bboxMin");
+
+	lua_createtable(L, 0, 3);
+	lua_pushnumber(L, result.bboxMax.x);
+	lua_setfield(L, -2, "x");
+	lua_pushnumber(L, result.bboxMax.y);
+	lua_setfield(L, -2, "y");
+	lua_pushnumber(L, result.bboxMax.z);
+	lua_setfield(L, -2, "z");
+	lua_setfield(L, -2, "bboxMax");
+
+	// zLevels array
+	lua_createtable(L, static_cast<int>(result.zLevels.size()), 0);
+	int idx = 1;
+	for (uint8_t z : result.zLevels) {
+		lua_pushnumber(L, z);
+		lua_rawseti(L, -2, idx++);
+	}
+	lua_setfield(L, -2, "zLevels");
+
+	// entries array of positions
+	lua_createtable(L, static_cast<int>(result.entryTiles.size()), 0);
+	idx = 1;
+	for (const auto &entry : result.entryTiles) {
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, entry.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, entry.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, entry.z);
+		lua_setfield(L, -2, "z");
+		lua_rawseti(L, -2, idx++);
+	}
+	lua_setfield(L, -2, "entries");
+
+	// teleportEntries: external teleports leading into the zone [{source={x,y,z}, dest={x,y,z}}]
+	lua_createtable(L, static_cast<int>(result.teleportEntries.size()), 0);
+	idx = 1;
+	for (const auto &[src, dst] : result.teleportEntries) {
+		lua_createtable(L, 0, 2);
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, src.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, src.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, src.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "source");
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, dst.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, dst.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, dst.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "dest");
+		lua_rawseti(L, -2, idx++);
+	}
+	lua_setfield(L, -2, "teleportEntries");
+
+	// internalTeleports: teleports within the zone [{source={x,y,z}, dest={x,y,z}}]
+	lua_createtable(L, static_cast<int>(result.internalTeleports.size()), 0);
+	idx = 1;
+	for (const auto &[src, dst] : result.internalTeleports) {
+		lua_createtable(L, 0, 2);
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, src.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, src.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, src.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "source");
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, dst.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, dst.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, dst.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "dest");
+		lua_rawseti(L, -2, idx++);
+	}
+	lua_setfield(L, -2, "internalTeleports");
+
+	// exitTeleports: teleports inside the zone leading outside [{source={x,y,z}, dest={x,y,z}}]
+	lua_createtable(L, static_cast<int>(result.exitTeleports.size()), 0);
+	idx = 1;
+	for (const auto &[src, dst] : result.exitTeleports) {
+		lua_createtable(L, 0, 2);
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, src.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, src.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, src.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "source");
+		lua_createtable(L, 0, 3);
+		lua_pushnumber(L, dst.x);
+		lua_setfield(L, -2, "x");
+		lua_pushnumber(L, dst.y);
+		lua_setfield(L, -2, "y");
+		lua_pushnumber(L, dst.z);
+		lua_setfield(L, -2, "z");
+		lua_setfield(L, -2, "dest");
+		lua_rawseti(L, -2, idx++);
+	}
+	lua_setfield(L, -2, "exitTeleports");
+
+	return 1;
+}
+
+int ZoneFunctions::luaZoneContains(lua_State* L) {
+	// Zone:contains(position)
+	const auto &zone = Lua::getUserdataShared<Zone>(L, 1);
+	if (!zone) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_ZONE_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	const auto pos = Lua::getPosition(L, 2);
+	Lua::pushBoolean(L, zone->contains(pos));
 	return 1;
 }
 

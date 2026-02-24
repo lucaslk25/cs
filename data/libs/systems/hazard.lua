@@ -163,7 +163,7 @@ function Hazard:register()
 		player:setHazardSystemPoints(self:getPlayerCurrentLevel(player))
 	end
 
-	function event.afterLeave(zone, creature)
+	function event.afterLeave(zone, creature, isLogout)
 		local player = creature:getPlayer()
 		if not player then
 			return

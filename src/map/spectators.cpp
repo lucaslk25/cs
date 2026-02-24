@@ -146,9 +146,6 @@ CreatureVector Spectators::getSpectators(const Position &centerPos, bool multifl
 	const MapSector* startSector = g_game().map.getMapSector(startx1, starty1);
 	const MapSector* sectorS = startSector;
 
-	// Pre-calculate type checks
-	const bool needsTypeCheck = onlyPlayers || onlyMonsters || onlyNpcs;
-
 	for (int32_t ny = starty1; ny <= endy2; ny += SECTOR_SIZE) {
 		const MapSector* sectorE = sectorS;
 		for (int32_t nx = startx1; nx <= endx2; nx += SECTOR_SIZE) {

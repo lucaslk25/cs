@@ -654,6 +654,10 @@ void Monster::updateTargetList() {
 
 	for (const auto &spectator : Spectators().find<Creature>(position, true, 0, 0, 0, 0, false)) {
 		if (spectator.get() != this && canSee(spectator->getPosition())) {
+			// Instance System: only consider creatures in the same instance
+			if (spectator->getInstanceID() != getInstanceID() && !spectator->isVisibleToAllInstances() && !isVisibleToAllInstances()) {
+				continue;
+			}
 			onCreatureFound(spectator);
 		}
 	}
@@ -684,6 +688,11 @@ void Monster::onCreatureEnter(const std::shared_ptr<Creature> &creature) {
 }
 
 bool Monster::isFriend(const std::shared_ptr<Creature> &creature) const {
+	// Instance System: creatures in different instances are not friends
+	if (creature->getInstanceID() != getInstanceID() && !creature->isVisibleToAllInstances() && !isVisibleToAllInstances()) {
+		return false;
+	}
+
 	const auto &master = getMaster();
 	const auto &masterPlayer = master ? master->getPlayer() : nullptr;
 	if (isSummon() && masterPlayer) {
@@ -705,6 +714,11 @@ bool Monster::isFriend(const std::shared_ptr<Creature> &creature) const {
 
 bool Monster::isOpponent(const std::shared_ptr<Creature> &creature) const {
 	if (!creature) {
+		return false;
+	}
+
+	// Instance System: creatures in different instances are not opponents
+	if (creature->getInstanceID() != getInstanceID() && !creature->isVisibleToAllInstances() && !isVisibleToAllInstances()) {
 		return false;
 	}
 

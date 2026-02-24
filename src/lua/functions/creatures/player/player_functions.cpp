@@ -33,6 +33,7 @@
 #include "creatures/players/wheel/player_wheel.hpp"
 #include "server/network/protocol/protocolgame.hpp"
 #include "game/game.hpp"
+#include "game/instances/instance_manager.hpp"
 #include "game/scheduling/save_manager.hpp"
 #include "io/iobestiary.hpp"
 #include "io/iologindata.hpp"
@@ -458,6 +459,11 @@ void PlayerFunctions::init(lua_State* L) {
 
 	Lua::registerMethod(L, "Player", "dropConnection", PlayerFunctions::luaPlayerDropConnection);
 
+	// Instance System
+	Lua::registerMethod(L, "Player", "getInstanceId", PlayerFunctions::luaPlayerGetInstanceId);
+	Lua::registerMethod(L, "Player", "setInstanceId", PlayerFunctions::luaPlayerSetInstanceId);
+	Lua::registerMethod(L, "Player", "changeInstance", PlayerFunctions::luaPlayerChangeInstance);
+
 	GroupFunctions::init(L);
 	GuildFunctions::init(L);
 	MountFunctions::init(L);
@@ -728,7 +734,7 @@ int PlayerFunctions::luaPlayerGetCharmChance(lua_State* L) {
 
 	charmRune_t charmId = Lua::getNumber<charmRune_t>(L, 2);
 	const auto &charm = g_iobestiary().getBestiaryCharm(charmId);
-	uint8_t charmTier = player->getCharmTier(charmId);
+	(void)player->getCharmTier(charmId);
 	return 1;
 }
 
@@ -3643,6 +3649,9 @@ int PlayerFunctions::luaPlayerSetGhostMode(lua_State* L) {
 
 	for (const auto &spectator : Spectators().find<Player>(position, true)) {
 		const auto &tmpPlayer = spectator->getPlayer();
+		if (!tmpPlayer || !tmpPlayer->isInSameInstance(player)) {
+			continue;
+		}
 		if (tmpPlayer != player && !tmpPlayer->isAccessPlayer()) {
 			if (enabled) {
 				tmpPlayer->sendRemoveTileThing(position, tile->getStackposOfCreature(tmpPlayer, player));
@@ -5449,6 +5458,50 @@ int PlayerFunctions::luaPlayerDropConnection(lua_State* L) {
 	}
 
 	player->disconnect();
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+// === Instance System Lua Bindings ===
+
+int PlayerFunctions::luaPlayerGetInstanceId(lua_State* L) {
+	// player:getInstanceId()
+	const auto &player = Lua::getUserdataShared<Player>(L, 1);
+	if (!player) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_PLAYER_NOT_FOUND));
+		return 1;
+	}
+	lua_pushnumber(L, player->getInstanceID());
+	return 1;
+}
+
+int PlayerFunctions::luaPlayerSetInstanceId(lua_State* L) {
+	// player:setInstanceId(instanceId)
+	// WARNING: This sets the instance directly WITHOUT ghost-style transition.
+	// Only use for initialization. For live switching use player:changeInstance().
+	const auto &player = Lua::getUserdataShared<Player>(L, 1);
+	if (!player) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_PLAYER_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 2);
+	player->setInstanceID(instanceId);
+	Lua::pushBoolean(L, true);
+	return 1;
+}
+
+int PlayerFunctions::luaPlayerChangeInstance(lua_State* L) {
+	// player:changeInstance(instanceId)
+	// Uses ghost-style 5-phase transition for safe context switching.
+	const auto &player = Lua::getUserdataShared<Player>(L, 1);
+	if (!player) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_PLAYER_NOT_FOUND));
+		Lua::pushBoolean(L, false);
+		return 1;
+	}
+	uint32_t instanceId = Lua::getNumber<uint32_t>(L, 2);
+	g_instanceManager().movePlayerToInstance(player, instanceId);
 	Lua::pushBoolean(L, true);
 	return 1;
 }

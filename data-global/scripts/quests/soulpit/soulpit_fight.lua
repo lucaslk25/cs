@@ -1,7 +1,7 @@
 SoulPit.zone:blockFamiliars()
 
 local zoneEvent = ZoneEvent(SoulPit.zone)
-function zoneEvent.afterLeave(zone, creature)
+function zoneEvent.afterLeave(zone, creature, isLogout)
 	local player = creature:getPlayer()
 	if not player then
 		return false

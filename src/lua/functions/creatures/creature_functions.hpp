@@ -127,4 +127,9 @@ private:
 	static int luaCreatureGetAttachedEffects(lua_State* L);
 	static int luaCreatureGetShader(lua_State* L);
 	static int luaCreatureSetShader(lua_State* L);
+
+	// Instance System
+	static int luaCreatureGetInstanceId(lua_State* L);
+	static int luaCreatureSetInstanceId(lua_State* L);
+	static int luaCreatureIsInSameInstance(lua_State* L);
 };

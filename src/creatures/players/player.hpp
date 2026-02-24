@@ -901,6 +901,7 @@ public:
 	void sendRemoveTileThing(const Position &pos, int32_t stackpos) const;
 	void sendUpdateTileCreature(const std::shared_ptr<Creature> &creature);
 	void sendUpdateTile(const std::shared_ptr<Tile> &updateTile, const Position &pos) const;
+	void sendMapDescription(const Position &pos) const;
 
 	void sendChannelMessage(const std::string &author, const std::string &text, SpeakClasses type, uint16_t channel) const;
 	void sendChannelEvent(uint16_t channelId, const std::string &playerName, ChannelEvent_t channelEvent) const;
@@ -1500,8 +1501,8 @@ public:
 		DeflectCondition(std::string source, ConditionType_t condition, uint8_t chance) :
 			source(source), condition(condition), chance(chance) { }
 		std::string source;
-		uint8_t chance = 0;
 		ConditionType_t condition = CONDITION_NONE;
+		uint8_t chance = 0;
 	};
 
 	const std::vector<DeflectCondition> &getDeflectConditions() const {

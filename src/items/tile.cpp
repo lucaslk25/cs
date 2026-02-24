@@ -23,6 +23,41 @@
 #include "creatures/monsters/monster.hpp"
 #include "creatures/players/player.hpp"
 #include "enums/account_type.hpp"
+
+// Instance System: helper to check if an item is visible to a player based on instanceid attribute
+static bool isItemVisibleToPlayer(const std::shared_ptr<Item> &item, const std::shared_ptr<Player> &player) {
+	const auto *attr = item->getCustomAttribute("instanceid");
+	if (!attr) {
+		return true; // No instanceid attribute = visible to all (global item)
+	}
+	uint32_t itemInstanceId = static_cast<uint32_t>(attr->getAttribute<int64_t>());
+	return itemInstanceId == player->getInstanceID() || itemInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL;
+}
+
+// Instance System: get instance id for filtering spectators in postAdd/postRemove (creature -> getInstanceID(); item -> attribute or global).
+// For creatures, prefer instance id set by Game::removeCreature before postRemoveNotification so we filter by pre-zone-change instance.
+static uint32_t getInstanceIdForThing(const std::shared_ptr<Thing> &thing) {
+	if (!thing) {
+		return 1;
+	}
+	const auto &creature = thing->getCreature();
+	if (creature) {
+		auto removalId = creature->takeInstanceIdForRemovalNotification();
+		if (removalId) {
+			return *removalId;
+		}
+		return creature->getInstanceID();
+	}
+	const auto &item = thing->getItem();
+	if (item) {
+		const auto *attr = item->getCustomAttribute("instanceid");
+		if (!attr) {
+			return 1; // global
+		}
+		return static_cast<uint32_t>(attr->getAttribute<int64_t>());
+	}
+	return 1;
+}
 #include "game/game.hpp"
 #include "game/movement/teleport.hpp"
 #include "game/zones/zone.hpp"
@@ -402,6 +437,10 @@ void Tile::onAddTileItem(const std::shared_ptr<Item> &item) {
 	// send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			// Instance System: only send item add to players who can see this item
+			if (!isItemVisibleToPlayer(item, tmpPlayer)) {
+				continue;
+			}
 			tmpPlayer->sendAddTileItem(static_self_cast<Tile>(), cylinderMapPos, item);
 		}
 	}
@@ -491,6 +530,10 @@ void Tile::onUpdateTileItem(const std::shared_ptr<Item> &oldItem, const ItemType
 	// send to client
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			// Instance System: only send item update to players who can see this item
+			if (!isItemVisibleToPlayer(newItem, tmpPlayer)) {
+				continue;
+			}
 			tmpPlayer->sendUpdateTileItem(static_self_cast<Tile>(), cylinderMapPos, newItem);
 		}
 	}
@@ -529,6 +572,11 @@ void Tile::onRemoveTileItem(const CreatureVector &spectators, const std::vector<
 	size_t i = 0;
 	for (const auto &spectator : spectators) {
 		if (const auto &tmpPlayer = spectator->getPlayer()) {
+			// Instance System: only send item remove to players who can see this item
+			if (!isItemVisibleToPlayer(item, tmpPlayer)) {
+				i++; // Still advance the stackpos index
+				continue;
+			}
 			tmpPlayer->sendRemoveTileThing(cylinderMapPos, oldStackPosVector[i++]);
 		}
 	}
@@ -641,6 +689,10 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 						if (tileCreature->getPlayer() && tileCreature->getPlayer()->isInGhostMode()) {
 							continue;
 						}
+						// Instance System: ignore creatures from different instances
+						if (!monster->isInSameInstance(tileCreature)) {
+							continue;
+						}
 
 						const auto &creatureMonster = tileCreature->getMonster();
 						if (!creatureMonster || !tileCreature->isPushable() || (creatureMonster->isSummon() && creatureMonster->getMaster()->getPlayer())) {
@@ -649,10 +701,20 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 					}
 				}
 			} else if (creatures && !creatures->empty()) {
+				bool hasBlockingCreature = false;
 				for (const auto &tileCreature : *creatures) {
-					if (!tileCreature->isInGhostMode()) {
-						return RETURNVALUE_NOTENOUGHROOM;
+					if (tileCreature->isInGhostMode()) {
+						continue;
 					}
+					// Instance System: ignore creatures from different instances
+					if (!monster->isInSameInstance(tileCreature)) {
+						continue;
+					}
+					hasBlockingCreature = true;
+					break;
+				}
+				if (hasBlockingCreature) {
+					return RETURNVALUE_NOTENOUGHROOM;
 				}
 			}
 
@@ -750,9 +812,14 @@ ReturnValue Tile::queryAdd(int32_t, const std::shared_ptr<Thing> &thing, uint32_
 			}
 		} else if (creatures && !creatures->empty() && !hasBitSet(FLAG_IGNOREBLOCKCREATURE, tileFlags)) {
 			for (const auto &tileCreature : *creatures) {
-				if (!tileCreature->isInGhostMode()) {
-					return RETURNVALUE_NOTENOUGHROOM;
+				if (tileCreature->isInGhostMode()) {
+					continue;
 				}
+				// Instance System: ignore creatures from different instances
+				if (!creature->isInSameInstance(tileCreature)) {
+					continue;
+				}
+				return RETURNVALUE_NOTENOUGHROOM;
 			}
 		}
 
@@ -1405,7 +1472,12 @@ int32_t Tile::getClientIndexOfCreature(const std::shared_ptr<Player> &player, co
 
 	const TileItemVector* items = getItemList();
 	if (items) {
-		n += items->getTopItemCount();
+		// Instance System: count only top items visible to this player
+		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+			if (isItemVisibleToPlayer(*it, player)) {
+				++n;
+			}
+		}
 	}
 
 	if (const CreatureVector* creatures = getCreatures()) {
@@ -1430,9 +1502,13 @@ int32_t Tile::getStackposOfCreature(const std::shared_ptr<Player> &player, const
 
 	const TileItemVector* items = getItemList();
 	if (items) {
-		n += items->getTopItemCount();
-		if (n >= 10) {
-			return -1;
+		// Instance System: count only top items visible to this player
+		for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+			if (isItemVisibleToPlayer(*it, player)) {
+				if (++n >= 10) {
+					return -1;
+				}
+			}
 		}
 	}
 
@@ -1463,6 +1539,10 @@ int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std
 	if (items) {
 		if (item->isAlwaysOnTop()) {
 			for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+				// Instance System: skip items from other instances
+				if (!isItemVisibleToPlayer(*it, player)) {
+					continue;
+				}
 				if (*it == item) {
 					return n;
 				} else if (++n == 10) {
@@ -1470,9 +1550,13 @@ int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std
 				}
 			}
 		} else {
-			n += items->getTopItemCount();
-			if (n >= 10) {
-				return -1;
+			// Instance System: count only visible top items
+			for (auto it = items->getBeginTopItem(), end = items->getEndTopItem(); it != end; ++it) {
+				if (isItemVisibleToPlayer(*it, player)) {
+					if (++n >= 10) {
+						return -1;
+					}
+				}
 			}
 		}
 	}
@@ -1489,6 +1573,10 @@ int32_t Tile::getStackposOfItem(const std::shared_ptr<Player> &player, const std
 
 	if (items && !item->isAlwaysOnTop()) {
 		for (auto it = items->getBeginDownItem(), end = items->getEndDownItem(); it != end; ++it) {
+			// Instance System: skip items from other instances
+			if (!isItemVisibleToPlayer(*it, player)) {
+				continue;
+			}
 			if (*it == item) {
 				return n;
 			} else if (++n >= 10) {
@@ -1560,8 +1648,12 @@ void Tile::postAddNotification(const std::shared_ptr<Thing> &thing, const std::s
 		return;
 	}
 
-	for (const auto &spectator : Spectators().find<Player>(getPosition(), true)) {
-		spectator->getPlayer()->postAddNotification(thing, oldParent, index, LINK_NEAR);
+	const uint32_t thingInstanceId = getInstanceIdForThing(thing);
+	auto allSpectators = Spectators().find<Player>(getPosition(), true);
+	for (const auto &spectator : allSpectators) {
+		if (thingInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL || spectator->getInstanceID() == thingInstanceId) {
+			spectator->getPlayer()->postAddNotification(thing, oldParent, index, LINK_NEAR);
+		}
 	}
 
 	// add a reference to this item, it may be deleted after being added (mailbox for example)
@@ -1605,13 +1697,20 @@ void Tile::postRemoveNotification(const std::shared_ptr<Thing> &thing, const std
 		return;
 	}
 
-	auto spectators = Spectators().find<Player>(getPosition(), true);
-
-	if (getThingCount() > 8) {
-		onUpdateTile(spectators.data());
+	const uint32_t thingInstanceId = getInstanceIdForThing(thing);
+	auto allSpectators = Spectators().find<Player>(getPosition(), true);
+	CreatureVector filteredSpectators;
+	for (const auto &spec : allSpectators) {
+		if (thingInstanceId == Creature::INSTANCE_VISIBLE_TO_ALL || spec->getInstanceID() == thingInstanceId) {
+			filteredSpectators.push_back(spec);
+		}
 	}
 
-	for (const auto &spectator : spectators) {
+	if (getThingCount() > 8) {
+		onUpdateTile(filteredSpectators);
+	}
+
+	for (const auto &spectator : filteredSpectators) {
 		spectator->getPlayer()->postRemoveNotification(thing, newParent, index, LINK_NEAR);
 	}
 

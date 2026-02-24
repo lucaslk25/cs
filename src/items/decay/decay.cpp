@@ -109,7 +109,7 @@ void Decay::checkDecay() {
 		it = decayMap.erase(it);
 	}
 
-	for (const auto item : tempItems) {
+	for (const auto &item : tempItems) {
 		if (!item->canDecay()) {
 			item->setDuration(item->getDuration());
 			item->setDecaying(DECAYING_FALSE);

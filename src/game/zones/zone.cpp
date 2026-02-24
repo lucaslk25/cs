@@ -19,10 +19,14 @@
 
 #include "game/game.hpp"
 #include "creatures/monsters/monster.hpp"
+#include "creatures/monsters/spawns/spawn_monster.hpp"
 #include "creatures/npcs/npc.hpp"
 #include "creatures/players/player.hpp"
 #include "utils/pugicast.hpp"
 #include "kv/kv.hpp"
+#include "game/movement/teleport.hpp"
+
+#include <queue>
 
 phmap::parallel_flat_hash_map<std::string, std::shared_ptr<Zone>> Zone::zones = {};
 phmap::parallel_flat_hash_map<uint32_t, std::shared_ptr<Zone>> Zone::zonesByID = {};
@@ -64,6 +68,356 @@ void Zone::subtractArea(Area area) {
 		removePosition(pos);
 	}
 	refresh();
+}
+
+static Position computeFloorchangeDest(const std::shared_ptr<Tile> &tile) {
+	if (!tile) {
+		return {};
+	}
+	auto pos = tile->getPosition();
+
+	if (tile->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
+		Position dest(pos.x, pos.y, pos.z + 1);
+		auto destTile = g_game().map.getTile(dest.x, dest.y, dest.z);
+		if (destTile) {
+			if (destTile->hasFlag(TILESTATE_FLOORCHANGE_NORTH)) {
+				dest.y += 1;
+			} else if (destTile->hasFlag(TILESTATE_FLOORCHANGE_SOUTH)) {
+				dest.y -= 1;
+			} else if (destTile->hasFlag(TILESTATE_FLOORCHANGE_EAST)) {
+				dest.x -= 1;
+			} else if (destTile->hasFlag(TILESTATE_FLOORCHANGE_WEST)) {
+				dest.x += 1;
+			} else if (destTile->hasFlag(TILESTATE_FLOORCHANGE_SOUTH_ALT)) {
+				dest.y -= 2;
+			} else if (destTile->hasFlag(TILESTATE_FLOORCHANGE_EAST_ALT)) {
+				dest.x -= 2;
+			}
+		}
+		return dest;
+	}
+
+	if (tile->hasFlag(TILESTATE_FLOORCHANGE)) {
+		Position dest(pos.x, pos.y, pos.z - 1);
+		if (tile->hasFlag(TILESTATE_FLOORCHANGE_NORTH)) {
+			dest.y -= 1;
+		} else if (tile->hasFlag(TILESTATE_FLOORCHANGE_SOUTH)) {
+			dest.y += 1;
+		} else if (tile->hasFlag(TILESTATE_FLOORCHANGE_EAST)) {
+			dest.x += 1;
+		} else if (tile->hasFlag(TILESTATE_FLOORCHANGE_WEST)) {
+			dest.x -= 1;
+		} else if (tile->hasFlag(TILESTATE_FLOORCHANGE_SOUTH_ALT)) {
+			dest.y += 2;
+		} else if (tile->hasFlag(TILESTATE_FLOORCHANGE_EAST_ALT)) {
+			dest.x += 2;
+		}
+		return dest;
+	}
+	return {};
+}
+
+FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxTiles) {
+	Benchmark bm;
+	FloodFillResult result;
+	result.bboxMin = Position(std::numeric_limits<uint16_t>::max(), std::numeric_limits<uint16_t>::max(), 15);
+	result.bboxMax = Position(0, 0, 0);
+
+	auto startTile = g_game().map.getTile(startPos.x, startPos.y, startPos.z);
+	if (!startTile) {
+		g_logger().warn("[Zone::buildFromFloodFill] No tile at start position {}", startPos.toString());
+		return result;
+	}
+
+	std::unordered_set<Position> visited;
+	std::queue<Position> queue;
+	queue.push(startPos);
+	visited.insert(startPos);
+
+	while (!queue.empty() && visited.size() <= maxTiles) {
+		auto current = queue.front();
+		queue.pop();
+
+		auto tile = g_game().map.getTile(current.x, current.y, current.z);
+		if (!tile) {
+			continue;
+		}
+
+		addPosition(current);
+		result.tilesAdded++;
+		result.zLevels.insert(current.z);
+
+		result.bboxMin.x = std::min(result.bboxMin.x, current.x);
+		result.bboxMin.y = std::min(result.bboxMin.y, current.y);
+		result.bboxMin.z = std::min(result.bboxMin.z, current.z);
+		result.bboxMax.x = std::max(result.bboxMax.x, current.x);
+		result.bboxMax.y = std::max(result.bboxMax.y, current.y);
+		result.bboxMax.z = std::max(result.bboxMax.z, current.z);
+
+		bool hasFloorChange = tile->hasFlag(TILESTATE_FLOORCHANGE);
+		if (hasFloorChange) {
+			auto dest = computeFloorchangeDest(tile);
+			if (dest.x != 0 && !visited.count(dest) && dest.z >= startPos.z) {
+				visited.insert(dest);
+				queue.push(dest);
+			}
+		}
+
+		if (tile->hasFlag(TILESTATE_TELEPORT)) {
+			auto teleport = tile->getTeleportItem();
+			if (teleport) {
+				const auto &tpDest = teleport->getDestPos();
+				if (tpDest.x != 0 && !visited.count(tpDest)
+					&& std::abs(static_cast<int>(tpDest.x) - static_cast<int>(startPos.x)) < 200
+					&& std::abs(static_cast<int>(tpDest.y) - static_cast<int>(startPos.y)) < 200) {
+					auto tpDestTile = g_game().map.getTile(tpDest.x, tpDest.y, tpDest.z);
+					if (tpDestTile && !tpDestTile->hasFlag(TILESTATE_PROTECTIONZONE)) {
+						visited.insert(tpDest);
+						queue.push(tpDest);
+					}
+				}
+			}
+		}
+
+		// Expand to 4 cardinal neighbors on same z-level
+		static const int dx[] = { -1, 1, 0, 0 };
+		static const int dy[] = { 0, 0, -1, 1 };
+		for (int i = 0; i < 4; i++) {
+			Position neighbor(current.x + dx[i], current.y + dy[i], current.z);
+			if (visited.count(neighbor)) {
+				continue;
+			}
+			auto neighborTile = g_game().map.getTile(neighbor.x, neighbor.y, neighbor.z);
+			if (!neighborTile) {
+				continue;
+			}
+			if (neighborTile->hasProperty(CONST_PROP_BLOCKSOLID) && !neighborTile->hasFlag(TILESTATE_FLOORCHANGE)) {
+				continue;
+			}
+			if (neighborTile->hasFlag(TILESTATE_PROTECTIONZONE)) {
+				continue;
+			}
+			visited.insert(neighbor);
+			queue.push(neighbor);
+		}
+	}
+
+	// Detect entry tiles: floor-change tiles whose destination is OUTSIDE the zone,
+	// but only if the destination has a reverse path back into the zone (bidirectional entry).
+	for (const auto &pos : positions) {
+		auto tile = g_game().map.getTile(pos.x, pos.y, pos.z);
+		if (!tile || !tile->hasFlag(TILESTATE_FLOORCHANGE)) {
+			continue;
+		}
+		auto dest = computeFloorchangeDest(tile);
+		if (dest.x == 0 || positions.count(dest)) {
+			continue;
+		}
+		auto destTile = g_game().map.getTile(dest.x, dest.y, dest.z);
+		if (!destTile) {
+			continue;
+		}
+		bool hasReverse = false;
+		if (destTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN) || destTile->hasFlag(TILESTATE_FLOORCHANGE)) {
+			auto reverseDest = computeFloorchangeDest(destTile);
+			if (reverseDest.x != 0 && positions.count(reverseDest)) {
+				hasReverse = true;
+			}
+		}
+		if (!hasReverse) {
+			static const int sdx[] = { -1, 1, 0, 0 };
+			static const int sdy[] = { 0, 0, -1, 1 };
+			for (int i = 0; i < 4 && !hasReverse; i++) {
+				auto adjTile = g_game().map.getTile(dest.x + sdx[i], dest.y + sdy[i], dest.z);
+				if (adjTile && (adjTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN) || adjTile->hasFlag(TILESTATE_FLOORCHANGE))) {
+					auto revDest = computeFloorchangeDest(adjTile);
+					if (revDest.x != 0 && positions.count(revDest)) {
+						hasReverse = true;
+					}
+				}
+			}
+		}
+		if (hasReverse) {
+			result.entryTiles.push_back(dest);
+		}
+	}
+
+	// Also check tiles just outside the zone that have floorchange INTO the zone
+	std::unordered_set<Position> border;
+	for (const auto &pos : positions) {
+		static const int bdx[] = { -1, 1, 0, 0 };
+		static const int bdy[] = { 0, 0, -1, 1 };
+		for (int i = 0; i < 4; i++) {
+			Position adj(pos.x + bdx[i], pos.y + bdy[i], pos.z);
+			if (!positions.count(adj) && !border.count(adj)) {
+				border.insert(adj);
+			}
+		}
+	}
+	// Check tiles one z-level above/below zone tiles for vertical entries
+	for (uint8_t z : result.zLevels) {
+		if (z > 0) {
+			uint8_t aboveZ = z - 1;
+			if (!result.zLevels.count(aboveZ)) {
+				for (const auto &pos : positions) {
+					if (pos.z != z) {
+						continue;
+					}
+					auto aboveTile = g_game().map.getTile(pos.x, pos.y, aboveZ);
+					if (aboveTile && aboveTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
+						auto dest = computeFloorchangeDest(aboveTile);
+						if (dest.x != 0 && positions.count(dest)) {
+							result.entryTiles.push_back(Position(pos.x, pos.y, aboveZ));
+						}
+					}
+				}
+			}
+		}
+		if (z < 15) {
+			uint8_t belowZ = z + 1;
+			if (!result.zLevels.count(belowZ)) {
+				for (const auto &pos : positions) {
+					if (pos.z != z) {
+						continue;
+					}
+					auto belowTile = g_game().map.getTile(pos.x, pos.y, belowZ);
+					if (belowTile && belowTile->hasFlag(TILESTATE_FLOORCHANGE) && !belowTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
+						auto dest = computeFloorchangeDest(belowTile);
+						if (dest.x != 0 && positions.count(dest)) {
+							result.entryTiles.push_back(Position(pos.x, pos.y, belowZ));
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Deduplicate entries: cluster entries within 2 tiles on the same z-level
+	{
+		std::vector<Position> deduped;
+		for (const auto &entry : result.entryTiles) {
+			bool tooClose = false;
+			for (const auto &kept : deduped) {
+				if (entry.z == kept.z
+					&& std::abs(static_cast<int>(entry.x) - static_cast<int>(kept.x)) <= 2
+					&& std::abs(static_cast<int>(entry.y) - static_cast<int>(kept.y)) <= 2) {
+					tooClose = true;
+					break;
+				}
+			}
+			if (!tooClose) {
+				deduped.push_back(entry);
+			}
+		}
+		result.entryTiles = std::move(deduped);
+	}
+
+	// Classify teleports: scan zone tiles for teleport items
+	for (const auto &pos : positions) {
+		auto tile = g_game().map.getTile(pos.x, pos.y, pos.z);
+		if (!tile || !tile->hasFlag(TILESTATE_TELEPORT)) {
+			continue;
+		}
+		auto teleport = tile->getTeleportItem();
+		if (!teleport) {
+			continue;
+		}
+		const auto &tpDest = teleport->getDestPos();
+		if (tpDest.x == 0) {
+			continue;
+		}
+		if (positions.count(tpDest)) {
+			result.internalTeleports.emplace_back(pos, tpDest);
+		} else {
+			result.exitTeleports.emplace_back(pos, tpDest);
+		}
+	}
+
+	// Find external teleports leading INTO the zone (teleport entries)
+	{
+		uint16_t minX = std::numeric_limits<uint16_t>::max(), maxX = 0;
+		uint16_t minY = std::numeric_limits<uint16_t>::max(), maxY = 0;
+		uint8_t minZ = 15, maxZ = 0;
+		for (const auto &pos : positions) {
+			minX = std::min(minX, pos.x);
+			maxX = std::max(maxX, pos.x);
+			minY = std::min(minY, pos.y);
+			maxY = std::max(maxY, pos.y);
+			minZ = std::min(minZ, pos.z);
+			maxZ = std::max(maxZ, pos.z);
+		}
+		for (auto &[sectorKey, sector] : g_game().map.getMapSectors()) {
+			const uint16_t sectorBaseX = static_cast<uint16_t>((sectorKey & 0xFFFF) * SECTOR_SIZE);
+			const uint16_t sectorBaseY = static_cast<uint16_t>((sectorKey >> 16) * SECTOR_SIZE);
+
+			for (uint8_t z = 0; z < MAP_MAX_LAYERS; ++z) {
+				auto floor = sector.getFloor(z);
+				if (!floor) {
+					continue;
+				}
+				for (uint16_t tx = 0; tx < SECTOR_SIZE; ++tx) {
+					for (uint16_t ty = 0; ty < SECTOR_SIZE; ++ty) {
+						auto t = floor->getTile(sectorBaseX + tx, sectorBaseY + ty);
+						if (!t || !t->hasFlag(TILESTATE_TELEPORT)) {
+							continue;
+						}
+						Position srcPos(static_cast<uint16_t>(sectorBaseX + tx), static_cast<uint16_t>(sectorBaseY + ty), z);
+						if (positions.count(srcPos)) {
+							continue;
+						}
+						auto tp = t->getTeleportItem();
+						if (!tp) {
+							continue;
+						}
+						const auto &dest = tp->getDestPos();
+						if (dest.x >= minX && dest.x <= maxX
+							&& dest.y >= minY && dest.y <= maxY
+							&& dest.z >= minZ && dest.z <= maxZ
+							&& positions.count(dest)) {
+							result.teleportEntries.emplace_back(srcPos, dest);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Count spawns that overlap with the flood-filled zone (center OR any individual spawn position)
+	auto countSpawnsInZone = [&](std::vector<std::shared_ptr<SpawnMonster>> &spawnList) {
+		for (const auto &spawn : spawnList) {
+			if (positions.count(spawn->getCenterPos())) {
+				result.spawnCount++;
+				continue;
+			}
+			for (const auto &[id, sb] : spawn->getSpawnMonsterMap()) {
+				if (positions.count(sb.pos)) {
+					result.spawnCount++;
+					break;
+				}
+			}
+		}
+	};
+	countSpawnsInZone(g_game().map.spawnsMonster.getspawnMonsterList());
+	for (int i = 0; i < 50; i++) {
+		countSpawnsInZone(g_game().map.spawnsMonsterCustomMaps[i].getspawnMonsterList());
+	}
+
+	refresh();
+
+	auto duration = bm.duration();
+
+	std::map<uint8_t, uint32_t> tilesPerZ;
+	for (const auto &pos : positions) {
+		tilesPerZ[pos.z]++;
+	}
+	for (const auto &[z, count] : tilesPerZ) {
+		g_logger().info("[Zone::buildFromFloodFill] z={}: {} tiles", z, count);
+	}
+
+	g_logger().info("[Zone::buildFromFloodFill] Zone '{}' built from {} with {} tiles, {} z-levels, {} entries, {} spawns in {}ms",
+		name, startPos.toString(), result.tilesAdded, result.zLevels.size(), result.entryTiles.size(), result.spawnCount, duration);
+
+	return result;
 }
 
 bool Zone::contains(const Position &pos) const {

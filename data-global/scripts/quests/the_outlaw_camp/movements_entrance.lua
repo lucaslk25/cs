@@ -20,6 +20,7 @@ end
 brightSword:type("stepin")
 for value in pairs(config) do
 	brightSword:position(config[value].position)
+	registerScriptTeleport(config[value].position, config[value].destination)
 end
 
 brightSword:register()

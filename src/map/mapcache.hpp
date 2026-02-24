@@ -118,6 +118,10 @@ public:
 		return it != mapSectors.end() ? &it->second : nullptr;
 	}
 
+	std::unordered_map<uint32_t, MapSector> &getMapSectors() {
+		return mapSectors;
+	}
+
 protected:
 	std::shared_ptr<Tile> getOrCreateTileFromCache(const std::shared_ptr<Floor> &floor, uint16_t x, uint16_t y);
 

@@ -45,6 +45,7 @@ end
 
 for key, value in pairs(positionsTable) do
 	soul_war_entrances:position(key)
+	registerScriptTeleport(key, value)
 end
 
 soul_war_entrances:register()
@@ -113,6 +114,7 @@ end
 
 for key, value in pairs(claustrophobicInfernoTeleportPositions) do
 	claustrophobicInfernoTeleports:position(key)
+	registerScriptTeleport(key, value)
 end
 
 claustrophobicInfernoTeleports:register()
@@ -144,4 +146,5 @@ function goshnarSpiteEntrance.onStepIn(creature, item, position, fromPosition)
 end
 
 goshnarSpiteEntrance:position(SoulWarQuest.goshnarSpiteEntrancePosition.fromPos)
+registerScriptTeleport(SoulWarQuest.goshnarSpiteEntrancePosition.fromPos, SoulWarQuest.goshnarSpiteEntrancePosition.toPos)
 goshnarSpiteEntrance:register()
