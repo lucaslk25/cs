@@ -1,0 +1,57 @@
+---
+description: Instance system architecture and flow reference
+globs: src/game/instances/**,src/game/zones/**,data/libs/functions/hunt_instance.lua,data/libs/functions/instance_registry.lua,data/scripts/talkactions/gm/hunt_zone_helper.lua
+alwaysApply: false
+---
+
+# Instance System Architecture
+
+## Data Flow
+
+```
+HuntInstance:register() → _pendingZones queue
+    ↓ (mapOnLoad callback)
+doBuildZone() → Zone:buildFromFloodFill(seed) + expansion loop
+    ↓
+ZoneEvent afterEnter → onStepIn() when instanceId==1
+    ↓
+Game.createInstance() → InstanceManager::createInstance()
+    ↓
+Game.populateInstanceFromZone() → clone spawns
+    ↓
+player:changeInstance(id) → ghost transition
+    ↓
+ZoneEvent afterLeave → grace period → cleanupInstance()
+```
+
+## Instance Isolation (C++)
+
+Every creature has `instanceId`: 1=global, 2+=private, UINT32_MAX=visible-to-all (NPCs).
+Visibility, combat, effects, items, spectator lists — all filtered by instance.
+
+## Hunt Discovery (`/hunt` GM command)
+
+1. Detect entry (stair/hole/teleport/script-teleport) within 1 sqm
+2. `buildFromFloodFill` from destination — 8-neighbor BFS (cardinal + diagonal), same-Z, distance cap
+3. Expansion loop: follow script teleports + floor changes cross-z, flood-fill from destinations
+4. Classify entries (external→zone), exits (zone→external), internal teleports
+5. Auto-name from dominant monster + nearest town
+6. Save generates a `HuntInstance({...}):register()` Lua file
+
+## Zone Expansion Loop (critical logic)
+
+- `zone:contains(tp.source)` gates teleport following — no distance cap on destinations
+- Floor changes (holes/stairs) detected via `Tile:getFloorchangeDestination()`, expanded same as teleports
+- Search bbox re-computed from zone's actual positions each iteration
+- `checkedPositions` set ensures each tile checked for floor changes only once
+- `followedSources` set prevents re-processing same teleport
+- Up to 10 iterations for cascading z-levels (z=8 → z=9 → z=10 etc.)
+- Each expansion bounded by maxTiles cap and natural wall/PZ boundaries
+
+## BFS Behavior (C++)
+
+- 8-neighbor (cardinal + diagonal) matching game engine behavior
+- No adjacent-tile check for diagonals — game's `Map::getPathMatching` and `Game::internalMoveCreature` don't do this
+- Null tiles, BLOCKSOLID, and PZ tiles stop expansion
+- Same-z only — cross-z handled by Lua expansion loop
+- Same-z native teleport items followed within distance cap

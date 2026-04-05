@@ -1,0 +1,61 @@
+# Crystal Server — Claude Code Context
+
+You are working on **Crystal Server**, a C++/Lua MMORPG emulator (TFS lineage). Two repos: server (`/home/lucaslucas/repos/cs`) and client (`/home/lucaslucas/repos/otclient`).
+
+## Session Start Protocol
+
+At the start of EVERY session, before doing any work:
+
+1. Read `docs/HANDOFF.md` — current state, WIP, next steps, blockers
+2. Read `docs/INSTANCE_SYSTEM_ROADMAP.md` — overall plan and phase status
+3. Skim `docs/SESSION_LOG.md` (last 3 entries) — recent learnings and pitfalls
+4. Acknowledge context to the user: "I've reviewed the handoff. Current state: [summary]. Ready to continue with [next task]."
+
+## Session End Protocol
+
+Before ending a session with significant work, use `/session-end`:
+
+1. Update `docs/HANDOFF.md` with: what was done, current state, next steps, any blockers
+2. Append to `docs/SESSION_LOG.md`: date, summary, learnings, pitfalls
+3. Update `docs/INSTANCE_SYSTEM_ROADMAP.md` phase status if milestones changed
+4. If C++ was modified, note build status (compiled? warnings?)
+5. If bugs were found, document them with root cause in the session log
+
+## Development Rules
+
+- **Build after C++ changes:** `cd build/linux-debug && cmake --build .`
+- **Never commit without asking** the user first
+- **Prefer editing** existing files over creating new ones
+- **Test incrementally** — don't stack 5 untested changes
+- **Portuguese is fine** — user communicates in PT-BR; respond in the language they use
+
+## Key File Locations
+
+| Area | Path |
+|------|------|
+| Instance C++ | `src/game/instances/instance_manager.{hpp,cpp}` |
+| Zone C++ | `src/game/zones/zone.{hpp,cpp}` |
+| Zone Lua bindings | `src/lua/functions/core/game/zone_functions.{hpp,cpp}` |
+| Game Lua bindings | `src/lua/functions/core/game/game_functions.{hpp,cpp}` |
+| Hunt Instance Lua | `data/libs/functions/hunt_instance.lua` |
+| Teleport Registry | `data/libs/functions/teleport.lua` |
+| GM /hunt command | `data/scripts/talkactions/gm/hunt_zone_helper.lua` |
+| Instance Registry | `data/libs/functions/instance_registry.lua` |
+| Hunt registrations | `data/scripts/movements/hunt_*.lua` |
+
+## Reference Documentation
+
+- `docs/HANDOFF.md` — Living state, updated every session
+- `docs/SESSION_LOG.md` — Append-only learning journal
+- `docs/ARCHITECTURE.md` — System architecture reference (instance isolation, zone flood-fill, teleport taxonomy, Lua API)
+- `docs/INSTANCE_SYSTEM_ROADMAP.md` — Phase-based plan with checkboxes
+- `docs/WORKFLOW_README.md` — How the AI workflow works
+- `docs/HUNT_INSTANCE_TESTING.md` — Testing procedures
+
+## Available Slash Commands
+
+| Command | Purpose |
+|---------|---------|
+| `/session-start` | Load context from handoff, session log, and roadmap |
+| `/session-end` | Update handoff, append session log, update roadmap |
+| `/hunt-dev` | Hunt instance development workflow, checklist, and pitfalls |
