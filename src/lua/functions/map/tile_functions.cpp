@@ -19,6 +19,7 @@
 
 #include "creatures/combat/combat.hpp"
 #include "game/game.hpp"
+#include "game/zones/zone.hpp"
 #include "lua/functions/lua_functions_loader.hpp"
 
 void TileFunctions::init(lua_State* L) {
@@ -64,6 +65,7 @@ void TileFunctions::init(lua_State* L) {
 
 	Lua::registerMethod(L, "Tile", "getHouse", TileFunctions::luaTileGetHouse);
 	Lua::registerMethod(L, "Tile", "sweep", TileFunctions::luaTileSweep);
+	Lua::registerMethod(L, "Tile", "getFloorchangeDestination", TileFunctions::luaTileGetFloorchangeDestination);
 }
 
 int TileFunctions::luaTileCreate(lua_State* L) {
@@ -744,5 +746,21 @@ int TileFunctions::luaTileSweep(lua_State* L) {
 	}
 
 	Lua::pushBoolean(L, house->transferToDepot(actor, houseTile));
+	return 1;
+}
+
+int TileFunctions::luaTileGetFloorchangeDestination(lua_State* L) {
+	// tile:getFloorchangeDestination()
+	const auto &tile = Lua::getUserdataShared<Tile>(L, 1);
+	if (!tile) {
+		lua_pushnil(L);
+		return 1;
+	}
+	auto dest = computeFloorchangeDestination(tile);
+	if (dest.x == 0) {
+		lua_pushnil(L);
+		return 1;
+	}
+	Lua::pushPosition(L, dest);
 	return 1;
 }

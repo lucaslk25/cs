@@ -22,6 +22,7 @@
 #include "creatures/creature.hpp"
 
 #include <set>
+#include <vector>
 
 class Tile;
 class Creature;
@@ -163,6 +164,8 @@ namespace weak {
 	}
 }
 
+Position computeFloorchangeDestination(const std::shared_ptr<Tile> &tile);
+
 class Zone {
 public:
 	explicit Zone(std::string name, uint32_t id = 0) :
@@ -179,7 +182,8 @@ public:
 	}
 	void addArea(Area area);
 	void subtractArea(Area area);
-	FloodFillResult buildFromFloodFill(const Position &startPos, uint32_t maxTiles = 5000);
+	FloodFillResult buildFromFloodFill(const Position &startPos, uint32_t maxTiles = 5000, uint32_t maxDistance = 300);
+	uint32_t expandFromFloodFill(const std::vector<Position> &startPositions, uint32_t maxTiles);
 	void addPosition(const Position &position) {
 		positions.emplace(position);
 	}
@@ -230,6 +234,7 @@ public:
 		}
 	}
 	static void clearZones();
+	static bool removeZone(const std::string &name);
 
 	static bool loadFromXML(const std::string &fileName, uint16_t shiftID = 0);
 

@@ -29,6 +29,7 @@ void ZoneFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Zone", "addArea", ZoneFunctions::luaZoneAddArea);
 	Lua::registerMethod(L, "Zone", "subtractArea", ZoneFunctions::luaZoneSubtractArea);
 	Lua::registerMethod(L, "Zone", "buildFromFloodFill", ZoneFunctions::luaZoneBuildFromFloodFill);
+	Lua::registerMethod(L, "Zone", "expandFromFloodFill", ZoneFunctions::luaZoneExpandFromFloodFill);
 	Lua::registerMethod(L, "Zone", "contains", ZoneFunctions::luaZoneContains);
 	Lua::registerMethod(L, "Zone", "getRemoveDestination", ZoneFunctions::luaZoneGetRemoveDestination);
 	Lua::registerMethod(L, "Zone", "setRemoveDestination", ZoneFunctions::luaZoneSetRemoveDestination);
@@ -50,6 +51,7 @@ void ZoneFunctions::init(lua_State* L) {
 	Lua::registerMethod(L, "Zone", "getByPosition", ZoneFunctions::luaZoneGetByPosition);
 	Lua::registerMethod(L, "Zone", "getByName", ZoneFunctions::luaZoneGetByName);
 	Lua::registerMethod(L, "Zone", "getAll", ZoneFunctions::luaZoneGetAll);
+	Lua::registerMethod(L, "Zone", "removeByName", ZoneFunctions::luaZoneRemoveByName);
 }
 
 // Zone
@@ -128,7 +130,7 @@ int ZoneFunctions::luaZoneSubtractArea(lua_State* L) {
 }
 
 int ZoneFunctions::luaZoneBuildFromFloodFill(lua_State* L) {
-	// Zone:buildFromFloodFill(startPos[, maxTiles])
+	// Zone:buildFromFloodFill(startPos[, maxTiles[, maxDistance]])
 	const auto &zone = Lua::getUserdataShared<Zone>(L, 1);
 	if (!zone) {
 		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_ZONE_NOT_FOUND));
@@ -137,13 +139,17 @@ int ZoneFunctions::luaZoneBuildFromFloodFill(lua_State* L) {
 	}
 	const auto startPos = Lua::getPosition(L, 2);
 	uint32_t maxTiles = Lua::getNumber<uint32_t>(L, 3, 5000);
+	uint32_t maxDistance = Lua::getNumber<uint32_t>(L, 4, 300);
 
-	auto result = zone->buildFromFloodFill(startPos, maxTiles);
+	auto result = zone->buildFromFloodFill(startPos, maxTiles, maxDistance);
 
 	lua_createtable(L, 0, 8);
 
 	lua_pushnumber(L, result.tilesAdded);
 	lua_setfield(L, -2, "tiles");
+
+	lua_pushnumber(L, result.tilesAdded);
+	lua_setfield(L, -2, "tilesAdded");
 
 	lua_pushnumber(L, result.spawnCount);
 	lua_setfield(L, -2, "spawns");
@@ -266,6 +272,38 @@ int ZoneFunctions::luaZoneBuildFromFloodFill(lua_State* L) {
 	}
 	lua_setfield(L, -2, "exitTeleports");
 
+	return 1;
+}
+
+int ZoneFunctions::luaZoneExpandFromFloodFill(lua_State* L) {
+	// Zone:expandFromFloodFill(positionsTable, maxTiles)
+	const auto &zone = Lua::getUserdataShared<Zone>(L, 1);
+	if (!zone) {
+		Lua::reportErrorFunc(Lua::getErrorDesc(LUA_ERROR_ZONE_NOT_FOUND));
+		lua_pushnumber(L, 0);
+		return 1;
+	}
+
+	if (!lua_istable(L, 2)) {
+		Lua::reportErrorFunc("Second argument must be a table of positions");
+		lua_pushnumber(L, 0);
+		return 1;
+	}
+
+	uint32_t maxTiles = Lua::getNumber<uint32_t>(L, 3, 5000);
+
+	std::vector<Position> startPositions;
+	lua_pushnil(L);
+	while (lua_next(L, 2) != 0) {
+		// CRITICAL: Use absolute index (lua_gettop(L)) instead of relative index -1
+		// to avoid stack indexing issues after lua_next pushes key+value
+		const auto pos = Lua::getPosition(L, lua_gettop(L));
+		startPositions.push_back(pos);
+		lua_pop(L, 1);
+	}
+
+	uint32_t tilesAdded = zone->expandFromFloodFill(startPositions, maxTiles);
+	lua_pushnumber(L, tilesAdded);
 	return 1;
 }
 
@@ -540,5 +578,12 @@ int ZoneFunctions::luaZoneRefresh(lua_State* L) {
 		return 1;
 	}
 	zone->refresh();
+	return 1;
+}
+
+int ZoneFunctions::luaZoneRemoveByName(lua_State* L) {
+	// Zone.removeByName(name)
+	const auto name = Lua::getString(L, 1);
+	Lua::pushBoolean(L, Zone::removeZone(name));
 	return 1;
 }

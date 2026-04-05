@@ -70,7 +70,7 @@ void Zone::subtractArea(Area area) {
 	refresh();
 }
 
-static Position computeFloorchangeDest(const std::shared_ptr<Tile> &tile) {
+Position computeFloorchangeDestination(const std::shared_ptr<Tile> &tile) {
 	if (!tile) {
 		return {};
 	}
@@ -117,7 +117,7 @@ static Position computeFloorchangeDest(const std::shared_ptr<Tile> &tile) {
 	return {};
 }
 
-FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxTiles) {
+FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxTiles, uint32_t maxDistance) {
 	Benchmark bm;
 	FloodFillResult result;
 	result.bboxMin = Position(std::numeric_limits<uint16_t>::max(), std::numeric_limits<uint16_t>::max(), 15);
@@ -129,10 +129,19 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 		return result;
 	}
 
+	// Clear any existing positions so repeated calls don't accumulate stale data
+	positions.clear();
+
 	std::unordered_set<Position> visited;
 	std::queue<Position> queue;
 	queue.push(startPos);
 	visited.insert(startPos);
+
+	// Chebyshev distance cap: prevents BFS from crossing connected-but-unrelated cave
+	// systems at the same z-level (e.g. Port Hope z=8 connected to Venore z=8 ~1200 tiles away).
+	const int distCap = static_cast<int>(maxDistance);
+	const int sx = static_cast<int>(startPos.x);
+	const int sy = static_cast<int>(startPos.y);
 
 	while (!queue.empty() && visited.size() <= maxTiles) {
 		auto current = queue.front();
@@ -154,22 +163,23 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 		result.bboxMax.y = std::max(result.bboxMax.y, current.y);
 		result.bboxMax.z = std::max(result.bboxMax.z, current.z);
 
-		bool hasFloorChange = tile->hasFlag(TILESTATE_FLOORCHANGE);
-		if (hasFloorChange) {
-			auto dest = computeFloorchangeDest(tile);
-			if (dest.x != 0 && !visited.count(dest) && dest.z >= startPos.z) {
-				visited.insert(dest);
-				queue.push(dest);
-			}
-		}
+		// Floor changes are NOT followed. The z-level of the seed is the only z-level
+		// this function maps. Cross-z connections (stairs, holes) are handled by the
+		// Lua expansion loop via registered script teleports — those seeds are passed
+		// explicitly to expandFromFloodFill for each connected section.
+		// Following floor changes here caused the BFS to reach z=9, walk the entire
+		// connected underground (which spans the whole map), and include Venore/Farmine.
 
 		if (tile->hasFlag(TILESTATE_TELEPORT)) {
 			auto teleport = tile->getTeleportItem();
 			if (teleport) {
 				const auto &tpDest = teleport->getDestPos();
+				// Same z-level only + distance guard: native teleport items that send the
+				// player to a different z-level or far away are not part of this cave section.
 				if (tpDest.x != 0 && !visited.count(tpDest)
-					&& std::abs(static_cast<int>(tpDest.x) - static_cast<int>(startPos.x)) < 200
-					&& std::abs(static_cast<int>(tpDest.y) - static_cast<int>(startPos.y)) < 200) {
+					&& tpDest.z == startPos.z
+					&& std::abs(static_cast<int>(tpDest.x) - sx) <= distCap
+					&& std::abs(static_cast<int>(tpDest.y) - sy) <= distCap) {
 					auto tpDestTile = g_game().map.getTile(tpDest.x, tpDest.y, tpDest.z);
 					if (tpDestTile && !tpDestTile->hasFlag(TILESTATE_PROTECTIONZONE)) {
 						visited.insert(tpDest);
@@ -179,12 +189,20 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 			}
 		}
 
-		// Expand to 4 cardinal neighbors on same z-level
-		static const int dx[] = { -1, 1, 0, 0 };
-		static const int dy[] = { 0, 0, -1, 1 };
-		for (int i = 0; i < 4; i++) {
+		// Cardinal + diagonal (8-neighbor). The game engine (Map::getPathMatching,
+		// Game::internalMoveCreature) does not check adjacent cardinal tiles for
+		// diagonal movement — only the destination tile matters. We match that
+		// behavior here. Wall-crossing through void is prevented by the null-tile
+		// check; BLOCKSOLID walls and PZ tiles stop expansion as before.
+		static const int dx[] = { -1, 1, 0, 0, -1, -1, 1, 1 };
+		static const int dy[] = { 0, 0, -1, 1, -1, 1, -1, 1 };
+		for (int i = 0; i < 8; i++) {
 			Position neighbor(current.x + dx[i], current.y + dy[i], current.z);
 			if (visited.count(neighbor)) {
+				continue;
+			}
+			if (std::abs(static_cast<int>(neighbor.x) - sx) > distCap
+				|| std::abs(static_cast<int>(neighbor.y) - sy) > distCap) {
 				continue;
 			}
 			auto neighborTile = g_game().map.getTile(neighbor.x, neighbor.y, neighbor.z);
@@ -209,7 +227,7 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 		if (!tile || !tile->hasFlag(TILESTATE_FLOORCHANGE)) {
 			continue;
 		}
-		auto dest = computeFloorchangeDest(tile);
+		auto dest = computeFloorchangeDestination(tile);
 		if (dest.x == 0 || positions.count(dest)) {
 			continue;
 		}
@@ -219,7 +237,7 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 		}
 		bool hasReverse = false;
 		if (destTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN) || destTile->hasFlag(TILESTATE_FLOORCHANGE)) {
-			auto reverseDest = computeFloorchangeDest(destTile);
+			auto reverseDest = computeFloorchangeDestination(destTile);
 			if (reverseDest.x != 0 && positions.count(reverseDest)) {
 				hasReverse = true;
 			}
@@ -230,7 +248,7 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 			for (int i = 0; i < 4 && !hasReverse; i++) {
 				auto adjTile = g_game().map.getTile(dest.x + sdx[i], dest.y + sdy[i], dest.z);
 				if (adjTile && (adjTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN) || adjTile->hasFlag(TILESTATE_FLOORCHANGE))) {
-					auto revDest = computeFloorchangeDest(adjTile);
+					auto revDest = computeFloorchangeDestination(adjTile);
 					if (revDest.x != 0 && positions.count(revDest)) {
 						hasReverse = true;
 					}
@@ -242,18 +260,6 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 		}
 	}
 
-	// Also check tiles just outside the zone that have floorchange INTO the zone
-	std::unordered_set<Position> border;
-	for (const auto &pos : positions) {
-		static const int bdx[] = { -1, 1, 0, 0 };
-		static const int bdy[] = { 0, 0, -1, 1 };
-		for (int i = 0; i < 4; i++) {
-			Position adj(pos.x + bdx[i], pos.y + bdy[i], pos.z);
-			if (!positions.count(adj) && !border.count(adj)) {
-				border.insert(adj);
-			}
-		}
-	}
 	// Check tiles one z-level above/below zone tiles for vertical entries
 	for (uint8_t z : result.zLevels) {
 		if (z > 0) {
@@ -265,7 +271,7 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 					}
 					auto aboveTile = g_game().map.getTile(pos.x, pos.y, aboveZ);
 					if (aboveTile && aboveTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
-						auto dest = computeFloorchangeDest(aboveTile);
+						auto dest = computeFloorchangeDestination(aboveTile);
 						if (dest.x != 0 && positions.count(dest)) {
 							result.entryTiles.push_back(Position(pos.x, pos.y, aboveZ));
 						}
@@ -282,7 +288,7 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 					}
 					auto belowTile = g_game().map.getTile(pos.x, pos.y, belowZ);
 					if (belowTile && belowTile->hasFlag(TILESTATE_FLOORCHANGE) && !belowTile->hasFlag(TILESTATE_FLOORCHANGE_DOWN)) {
-						auto dest = computeFloorchangeDest(belowTile);
+						auto dest = computeFloorchangeDestination(belowTile);
 						if (dest.x != 0 && positions.count(dest)) {
 							result.entryTiles.push_back(Position(pos.x, pos.y, belowZ));
 						}
@@ -420,6 +426,70 @@ FloodFillResult Zone::buildFromFloodFill(const Position &startPos, uint32_t maxT
 	return result;
 }
 
+uint32_t Zone::expandFromFloodFill(const std::vector<Position> &startPositions, uint32_t maxTiles) {
+	if (startPositions.empty()) {
+		return 0;
+	}
+
+	// Distance limiting is the caller's responsibility (Lua expansion loop filters
+	// destinations to seedPos ± maxDistance before calling this function).
+	// This function trusts the seeds it receives and simply flood-fills from them,
+	// bounded only by maxTiles and the map's natural walls/PZ boundaries.
+
+	std::unordered_set<Position> visited;
+	for (const auto &pos : positions) {
+		visited.insert(pos);
+	}
+
+	std::queue<Position> queue;
+	for (const auto &pos : startPositions) {
+		if (!visited.count(pos)) {
+			queue.push(pos);
+			visited.insert(pos);
+		}
+	}
+
+	uint32_t tilesAdded = 0;
+
+	while (!queue.empty() && tilesAdded < maxTiles) {
+		Position current = queue.front();
+		queue.pop();
+
+		auto tile = g_game().map.getTile(current.x, current.y, current.z);
+		if (!tile) {
+			continue;
+		}
+
+		positions.emplace(current);
+		tilesAdded++;
+
+		// Cardinal + diagonal (8-neighbor), matching game engine behavior.
+		static const int dx[] = { -1, 1, 0, 0, -1, -1, 1, 1 };
+		static const int dy[] = { 0, 0, -1, 1, -1, 1, -1, 1 };
+		for (int i = 0; i < 8; i++) {
+			Position neighbor(current.x + dx[i], current.y + dy[i], current.z);
+			if (visited.count(neighbor)) {
+				continue;
+			}
+			auto neighborTile = g_game().map.getTile(neighbor.x, neighbor.y, neighbor.z);
+			if (!neighborTile) {
+				continue;
+			}
+			if (neighborTile->hasProperty(CONST_PROP_BLOCKSOLID) && !neighborTile->hasFlag(TILESTATE_FLOORCHANGE)) {
+				continue;
+			}
+			if (neighborTile->hasFlag(TILESTATE_PROTECTIONZONE)) {
+				continue;
+			}
+			visited.insert(neighbor);
+			queue.push(neighbor);
+		}
+	}
+
+	refresh();
+	return tilesAdded;
+}
+
 bool Zone::contains(const Position &pos) const {
 	return positions.contains(pos);
 }
@@ -515,6 +585,23 @@ void Zone::clearZones() {
 	for (const auto &[_, zone] : zonesByID) {
 		zones[zone->name] = zone;
 	}
+}
+
+bool Zone::removeZone(const std::string &name) {
+	auto it = zones.find(name);
+	if (it == zones.end()) {
+		return false;
+	}
+	auto zone = it->second;
+	if (zone && zone->isStatic()) {
+		return false;
+	}
+	if (zone) {
+		zone->positions.clear();
+		zone->refresh();
+	}
+	zones.erase(it);
+	return true;
 }
 
 std::vector<std::shared_ptr<Zone>> Zone::getZones(const Position position) {

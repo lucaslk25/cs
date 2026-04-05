@@ -14,6 +14,7 @@ private:
 	static int luaZoneAddArea(lua_State* L);
 	static int luaZoneSubtractArea(lua_State* L);
 	static int luaZoneBuildFromFloodFill(lua_State* L);
+	static int luaZoneExpandFromFloodFill(lua_State* L);
 	static int luaZoneContains(lua_State* L);
 	static int luaZoneGetRemoveDestination(lua_State* L);
 	static int luaZoneSetRemoveDestination(lua_State* L);
@@ -34,4 +35,5 @@ private:
 	static int luaZoneGetByPosition(lua_State* L);
 	static int luaZoneGetByName(lua_State* L);
 	static int luaZoneGetAll(lua_State* L);
+	static int luaZoneRemoveByName(lua_State* L);
 };

@@ -63,4 +63,5 @@ private:
 
 	static int luaTileGetHouse(lua_State* L);
 	static int luaTileSweep(lua_State* L);
+	static int luaTileGetFloorchangeDestination(lua_State* L);
 };
