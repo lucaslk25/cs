@@ -14,6 +14,7 @@
 ---@field private leaveGracePeriod number
 ---@field private _floodFillResult table|nil
 HuntInstance = {}
+HuntInstance._pendingZones = {}
 
 --[[
 local hunt = HuntInstance({
@@ -297,19 +298,104 @@ function HuntInstance:register()
 		return false
 	end
 
+	-- Defer zone building until map is loaded (mainMapOnLoad callback)
+	table.insert(HuntInstance._pendingZones, self)
+	return true
+end
+
+-- ============================================================================
+-- Deferred Zone Building (called from mainMapOnLoad EventCallback)
+-- ============================================================================
+
+function HuntInstance.buildPendingZones()
+	for _, hunt in ipairs(HuntInstance._pendingZones) do
+		hunt:doBuildZone()
+	end
+	HuntInstance._pendingZones = {}
+end
+
+function HuntInstance:doBuildZone()
 	local zone = self:getZone()
 
 	-- Build zone via flood-fill from caveSeed
-	local result = zone:buildFromFloodFill(self.caveSeed, self.maxCaveTiles)
+	local result = zone:buildFromFloodFill(self.caveSeed, self.maxCaveTiles, self.maxDistance or 300)
 	self._floodFillResult = result
 
 	if result.tiles == 0 then
-		logger.error("HuntInstance:register - hunt '{}' flood-fill from {} found 0 tiles!", self.name, self.caveSeed:toString())
+		logger.error("HuntInstance:doBuildZone - hunt '{}' flood-fill from {} found 0 tiles!", self.name, self.caveSeed:toString())
 		return false
 	end
 
 	if result.spawns == 0 then
-		logger.warn("HuntInstance:register - hunt '{}' has NO spawns in flood-filled area!", self.name)
+		logger.warn("HuntInstance:doBuildZone - hunt '{}' has NO spawns in flood-filled area!", self.name)
+	end
+
+	-- Expansion loop: follow script teleports AND floor changes (holes/stairs)
+	-- from inside the zone to their destinations on other z-levels.
+	do
+		local followedSources = {}
+		local checkedPositions = {}
+		for _ = 1, 10 do
+			local zonePositions = zone:getPositions()
+			local minX, minY, maxX, maxY = 65535, 65535, 0, 0
+			local newDestinations = {}
+			local seenDests = {}
+
+			for _, p in ipairs(zonePositions) do
+				if p.x < minX then minX = p.x end
+				if p.y < minY then minY = p.y end
+				if p.x > maxX then maxX = p.x end
+				if p.y > maxY then maxY = p.y end
+
+				local posKey = p.x .. ":" .. p.y .. ":" .. p.z
+				if not checkedPositions[posKey] then
+					checkedPositions[posKey] = true
+					local tile = Tile(Position(p.x, p.y, p.z))
+					if tile then
+						if tile:hasFlag(TILESTATE_FLOORCHANGE) or tile:hasFlag(TILESTATE_FLOORCHANGE_DOWN) then
+							local dest = tile:getFloorchangeDestination()
+							if dest and dest.x ~= 0 and not zone:contains(dest) then
+								local destKey = dest.x .. ":" .. dest.y .. ":" .. dest.z
+								if not seenDests[destKey] then
+									seenDests[destKey] = true
+									table.insert(newDestinations, dest)
+								end
+							end
+						end
+					end
+				end
+			end
+
+			local searchFrom = Position(math.max(minX - 1, 0), math.max(minY - 1, 0), 0)
+			local searchTo = Position(maxX + 1, maxY + 1, 15)
+			local allScriptTeleports = getScriptTeleportsWithSourceInArea(searchFrom, searchTo)
+			for _, tp in ipairs(allScriptTeleports) do
+				local srcKey = tp.source.x .. ":" .. tp.source.y .. ":" .. tp.source.z
+				if not followedSources[srcKey]
+					and zone:contains(tp.source)
+					and not zone:contains(tp.dest) then
+					followedSources[srcKey] = true
+					local destKey = tp.dest.x .. ":" .. tp.dest.y .. ":" .. tp.dest.z
+					if not seenDests[destKey] then
+						seenDests[destKey] = true
+						table.insert(newDestinations, tp.dest)
+					end
+				end
+			end
+
+			if #newDestinations == 0 then break end
+			if zone:expandFromFloodFill(newDestinations, self.maxCaveTiles) == 0 then break end
+		end
+	end
+
+	-- Get actual zone size after expansion (result.tiles is only from initial buildFromFloodFill)
+	local actualPositions = zone:getPositions()
+	local actualTileCount = (type(actualPositions) == "table") and #actualPositions or result.tiles
+	local zSet = {}
+	if type(actualPositions) == "table" then
+		for _, p in ipairs(actualPositions) do
+			zSet[p.z] = true
+		end
 	end
 
 	zone:blockFamiliars()
@@ -374,16 +460,20 @@ function HuntInstance:register()
 	AdminRegistry.hunts[self.name] = self
 
 	local zStr = ""
-	if result.zLevels then
-		local parts = {}
-		for _, z in ipairs(result.zLevels) do
-			table.insert(parts, tostring(z))
-		end
-		zStr = table.concat(parts, ",")
+	local zList = {}
+	for z, _ in pairs(zSet) do table.insert(zList, z) end
+	table.sort(zList)
+	for _, z in ipairs(zList) do
+		zStr = zStr .. (zStr == "" and "" or ",") .. tostring(z)
 	end
 
-	logger.info("HuntInstance:register - registered hunt '{}': {} tiles, z=[{}], {} spawns, {} entries (flood-fill from {})",
-		self.name, result.tiles, zStr, result.spawns,
+	local expandedStr = ""
+	if actualTileCount > result.tiles then
+		expandedStr = string.format(" (%d initial + %d expanded)", result.tiles, actualTileCount - result.tiles)
+	end
+
+	logger.info("HuntInstance:doBuildZone - registered hunt '{}': {} tiles{}, z=[{}], {} spawns, {} entries (flood-fill from {})",
+		self.name, actualTileCount, expandedStr, zStr, result.spawns,
 		result.entries and #result.entries or 0, self.caveSeed:toString())
 	return true
 end

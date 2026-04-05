@@ -9,57 +9,22 @@
 --   /hunt clear                 → reset session
 --
 -- Global scan (browse all clusters):
---   /hunt scan[, filter]        → old grid-based cluster discovery (for browsing)
+--   /hunt scan[, filter]        → grid-based cluster discovery (for browsing)
 --   /hunt list[, page]          → browse clusters
 --   /hunt nearby                → 10 nearest clusters
 --   /hunt goto, <N>             → teleport to cluster center
 --   /hunt accept, <N>           → flood-fill from cluster center spawn, load into session
+--
+-- Batch registration:
+--   /hunt batch[, dry][, N/T][, zN-M] → auto-register all caves matching criteria
 
 -- ============================================================================
--- Utility: compute stair/hole destination using tile floor-change flags
+-- Utility: compute stair/hole destination — delegates to C++ Tile:getFloorchangeDestination()
 -- ============================================================================
 
 local function computeFloorchangeDestination(tile)
 	if not tile then return nil end
-	local pos = tile:getPosition()
-
-	if tile:hasFlag(TILESTATE_FLOORCHANGE_DOWN) then
-		local dest = Position(pos.x, pos.y, pos.z + 1)
-		local destTile = Tile(dest)
-		if destTile then
-			if destTile:hasFlag(TILESTATE_FLOORCHANGE_NORTH) then
-				dest.y = dest.y + 1
-			elseif destTile:hasFlag(TILESTATE_FLOORCHANGE_SOUTH) then
-				dest.y = dest.y - 1
-			elseif destTile:hasFlag(TILESTATE_FLOORCHANGE_EAST) then
-				dest.x = dest.x - 1
-			elseif destTile:hasFlag(TILESTATE_FLOORCHANGE_WEST) then
-				dest.x = dest.x + 1
-			elseif destTile:hasFlag(TILESTATE_FLOORCHANGE_SOUTH_ALT) then
-				dest.y = dest.y - 2
-			elseif destTile:hasFlag(TILESTATE_FLOORCHANGE_EAST_ALT) then
-				dest.x = dest.x - 2
-			end
-		end
-		return dest
-	elseif tile:hasFlag(TILESTATE_FLOORCHANGE) then
-		local dest = Position(pos.x, pos.y, pos.z - 1)
-		if tile:hasFlag(TILESTATE_FLOORCHANGE_NORTH) then
-			dest.y = dest.y - 1
-		elseif tile:hasFlag(TILESTATE_FLOORCHANGE_SOUTH) then
-			dest.y = dest.y + 1
-		elseif tile:hasFlag(TILESTATE_FLOORCHANGE_EAST) then
-			dest.x = dest.x + 1
-		elseif tile:hasFlag(TILESTATE_FLOORCHANGE_WEST) then
-			dest.x = dest.x - 1
-		elseif tile:hasFlag(TILESTATE_FLOORCHANGE_SOUTH_ALT) then
-			dest.y = dest.y + 2
-		elseif tile:hasFlag(TILESTATE_FLOORCHANGE_EAST_ALT) then
-			dest.x = dest.x + 2
-		end
-		return dest
-	end
-	return nil
+	return tile:getFloorchangeDestination()
 end
 
 local function safeTeleport(player, targetPos)
@@ -104,26 +69,34 @@ local function getNearestTownName(centerX, centerY)
 	return bestName
 end
 
-local huntNameRegistry = {}
-
-local function getDominantMonsterInArea(fromPos, toPos)
+-- Returns sorted list of {name, count} for spawns within an area.
+-- If `zone` is provided, only counts spawns whose position is inside the zone
+-- (precise irregular-shape filter). Otherwise uses the rectangular bbox only.
+local function getMonsterBreakdown(fromPos, toPos, zone)
 	local spawns = Game.getSpawnsInArea(fromPos, toPos)
-	if not spawns or #spawns == 0 then
-		return nil
-	end
+	if not spawns or #spawns == 0 then return {} end
 	local counts = {}
 	for _, s in ipairs(spawns) do
-		counts[s.name] = (counts[s.name] or 0) + 1
-	end
-	local bestName, bestCount = nil, 0
-	for name, count in pairs(counts) do
-		if count > bestCount then
-			bestName = name
-			bestCount = count
+		if not zone or zone:contains(Position(s.x, s.y, s.z)) then
+			counts[s.name] = (counts[s.name] or 0) + 1
 		end
 	end
-	return bestName
+	local list = {}
+	for name, count in pairs(counts) do
+		table.insert(list, { name = name, count = count })
+	end
+	table.sort(list, function(a, b) return a.count > b.count end)
+	return list
 end
+
+local function getDominantMonsterInArea(fromPos, toPos)
+	local list = getMonsterBreakdown(fromPos, toPos)
+	return list[1] and list[1].name or nil
+end
+
+-- huntNameRegistry is only used by autoNameClusters (batch scan/list flow).
+-- For individual /hunt discover we don't use a counter suffix.
+local huntNameRegistry = {}
 
 local function autoNameFromBBox(fromPos, toPos, centerX, centerY)
 	local dominant = getDominantMonsterInArea(fromPos, toPos)
@@ -131,16 +104,24 @@ local function autoNameFromBBox(fromPos, toPos, centerX, centerY)
 	if not dominant then
 		return string.format("Cave - %s", townName)
 	end
-	local baseKey = dominant .. " - " .. townName
-	huntNameRegistry[baseKey] = (huntNameRegistry[baseKey] or 0) + 1
-	local idx = huntNameRegistry[baseKey]
-	if idx == 1 then
-		return string.format("%s - %s", dominant, townName)
-	end
-	return string.format("%s - %s #%d", dominant, townName, idx)
+	return string.format("%s - %s", dominant, townName)
 end
 
-local function autoNameClusters(clusters)
+local function sanitizeFilename(name)
+	return name:lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+end
+
+local function huntFileExists(name)
+	local filepath = "data/scripts/movements/hunt_" .. sanitizeFilename(name) .. ".lua"
+	local f = io.open(filepath, "r")
+	if f then
+		f:close()
+		return true
+	end
+	return false
+end
+
+local function autoNameClusters(clusters, skipExistingFiles)
 	local batchIndex = {}
 	for _, cluster in ipairs(clusters) do
 		if cluster.monsters and #cluster.monsters > 0 then
@@ -151,15 +132,263 @@ local function autoNameClusters(clusters)
 			local baseKey = dominant .. " - " .. townName
 			batchIndex[baseKey] = (batchIndex[baseKey] or 0) + 1
 			local idx = batchIndex[baseKey]
+			local candidateName
 			if idx == 1 then
-				cluster.autoName = string.format("%s - %s", dominant, townName)
+				candidateName = string.format("%s - %s", dominant, townName)
 			else
-				cluster.autoName = string.format("%s - %s #%d", dominant, townName, idx)
+				candidateName = string.format("%s - %s #%d", dominant, townName, idx)
 			end
+			if skipExistingFiles then
+				while huntFileExists(candidateName) do
+					batchIndex[baseKey] = batchIndex[baseKey] + 1
+					idx = batchIndex[baseKey]
+					candidateName = string.format("%s - %s #%d", dominant, townName, idx)
+				end
+			end
+			cluster.autoName = candidateName
 		else
 			cluster.autoName = "Empty Cluster"
 		end
 	end
+end
+
+-- ============================================================================
+-- Shared helpers: expansion, classification, processing
+-- ============================================================================
+
+-- Numeric position key: avoids string concatenation + GC pressure for large zones.
+-- Safe for OT map coords (x/y <= 65535, z <= 15).
+local function posKey(p)
+	return p.z * 4294967296 + p.y * 65536 + p.x
+end
+
+local function expandZoneConnections(zone, maxTiles)
+	local followedSources = {}
+	local checkedPositions = {}
+
+	-- Compute initial bbox ONCE from the initial zone (before the loop).
+	-- Maintained incrementally from newDestinations after each expansion,
+	-- which avoids rescanning all N positions for bbox every iteration.
+	local minX, minY, maxX, maxY = 65535, 65535, 0, 0
+	for _, p in ipairs(zone:getPositions()) do
+		if p.x < minX then minX = p.x end
+		if p.y < minY then minY = p.y end
+		if p.x > maxX then maxX = p.x end
+		if p.y > maxY then maxY = p.y end
+	end
+
+	for _ = 1, 10 do
+		local newDestinations = {}
+		local seenDests = {}
+
+		-- Floor-change detection. zone:getPositions() is O(N) each call (C++ copy),
+		-- but checkedPositions ensures Tile() is only called for NEW tiles.
+		-- The bbox is NOT recomputed here — it's maintained incrementally below.
+		for _, p in ipairs(zone:getPositions()) do
+			local pk = posKey(p)
+			if not checkedPositions[pk] then
+				checkedPositions[pk] = true
+				local tile = Tile(Position(p.x, p.y, p.z))
+				if tile then
+					if tile:hasFlag(TILESTATE_FLOORCHANGE) or tile:hasFlag(TILESTATE_FLOORCHANGE_DOWN) then
+						local dest = tile:getFloorchangeDestination()
+						if dest and dest.x ~= 0 and not zone:contains(dest) then
+							local dk = posKey(dest)
+							if not seenDests[dk] then
+								seenDests[dk] = true
+								table.insert(newDestinations, dest)
+							end
+						end
+					end
+				end
+			end
+		end
+
+		-- Script teleport lookup uses the maintained bbox (not recomputed from scratch).
+		local searchFrom = Position(math.max(minX - 1, 0), math.max(minY - 1, 0), 0)
+		local searchTo = Position(maxX + 1, maxY + 1, 15)
+		for _, tp in ipairs(getScriptTeleportsWithSourceInArea(searchFrom, searchTo)) do
+			local sk = posKey(tp.source)
+			if not followedSources[sk]
+				and zone:contains(tp.source)
+				and not zone:contains(tp.dest) then
+				followedSources[sk] = true
+				local dk = posKey(tp.dest)
+				if not seenDests[dk] then
+					seenDests[dk] = true
+					table.insert(newDestinations, tp.dest)
+				end
+			end
+		end
+
+		if #newDestinations == 0 then break end
+		if zone:expandFromFloodFill(newDestinations, maxTiles) == 0 then break end
+
+		-- Update bbox from the destination seeds of this expansion.
+		-- The BFS from these seeds may add tiles beyond them, but bbox only grows,
+		-- so the next iteration's teleport search will be conservative (safe).
+		for _, d in ipairs(newDestinations) do
+			if d.x < minX then minX = d.x end
+			if d.y < minY then minY = d.y end
+			if d.x > maxX then maxX = d.x end
+			if d.y > maxY then maxY = d.y end
+		end
+	end
+end
+
+local function computeZoneStats(zone)
+	local positions = zone:getPositions()
+	if not positions or #positions == 0 then
+		return nil
+	end
+	local minX, minY, minZ = 65535, 65535, 255
+	local maxX, maxY, maxZ = 0, 0, 0
+	local zSet = {}
+	for _, p in ipairs(positions) do
+		if p.x < minX then minX = p.x end
+		if p.y < minY then minY = p.y end
+		if p.z < minZ then minZ = p.z end
+		if p.x > maxX then maxX = p.x end
+		if p.y > maxY then maxY = p.y end
+		if p.z > maxZ then maxZ = p.z end
+		zSet[p.z] = true
+	end
+	local zList = {}
+	for z, _ in pairs(zSet) do table.insert(zList, z) end
+	table.sort(zList)
+	local spawns = Game.getSpawnsInArea(
+		Position(minX, minY, minZ),
+		Position(maxX, maxY, maxZ))
+	return {
+		tiles = #positions,
+		bboxMin = { x = minX, y = minY, z = minZ },
+		bboxMax = { x = maxX, y = maxY, z = maxZ },
+		zLevels = zList,
+		spawns = spawns and #spawns or 0,
+	}
+end
+
+local function classifyZoneTeleports(zone, bboxFrom, bboxTo)
+	local teleportEntries = {}
+	local exitTeleports = {}
+	local internalTeleports = {}
+	local seen = {}
+	local allTeleports = {}
+
+	for _, tp in ipairs(getScriptTeleportSourcesToArea(bboxFrom, bboxTo)) do
+		local key = tp.source.x .. ":" .. tp.source.y .. ":" .. tp.source.z
+		if not seen[key] then
+			seen[key] = true
+			allTeleports[#allTeleports + 1] = tp
+		end
+	end
+	for _, tp in ipairs(getScriptTeleportsWithSourceInArea(bboxFrom, bboxTo)) do
+		local key = tp.source.x .. ":" .. tp.source.y .. ":" .. tp.source.z
+		if not seen[key] then
+			seen[key] = true
+			allTeleports[#allTeleports + 1] = tp
+		end
+	end
+
+	for _, tp in ipairs(allTeleports) do
+		local sourceInside = zone:contains(tp.source)
+		local destInside = zone:contains(tp.dest)
+		if sourceInside and destInside then
+			internalTeleports[#internalTeleports + 1] = { source = tp.source, dest = tp.dest }
+		elseif not sourceInside and destInside then
+			teleportEntries[#teleportEntries + 1] = { source = tp.source, dest = tp.dest }
+		elseif sourceInside and not destInside then
+			exitTeleports[#exitTeleports + 1] = { source = tp.source, dest = tp.dest }
+		end
+	end
+	return teleportEntries, exitTeleports, internalTeleports
+end
+
+local function processCluster(cluster, tempZoneName, maxTiles, maxDistance)
+	maxTiles = maxTiles or 5000
+	maxDistance = maxDistance or 300
+
+	local seedPos
+	if cluster.centerSpawnPos then
+		seedPos = Position(cluster.centerSpawnPos.x, cluster.centerSpawnPos.y, cluster.centerSpawnPos.z)
+	else
+		seedPos = Position(
+			math.floor((cluster.fromPos.x + cluster.toPos.x) / 2),
+			math.floor((cluster.fromPos.y + cluster.toPos.y) / 2),
+			cluster.zLevels and cluster.zLevels[1] or cluster.fromPos.z)
+	end
+
+	local zone = Zone(tempZoneName)
+	local result = zone:buildFromFloodFill(seedPos, maxTiles, maxDistance)
+	if not result or result.tiles == 0 then
+		return nil, "flood-fill found 0 tiles"
+	end
+
+	expandZoneConnections(zone, maxTiles)
+
+	local stats = computeZoneStats(zone)
+	if not stats then
+		return nil, "zone empty after expansion"
+	end
+
+	local bboxFrom = Position(stats.bboxMin.x, stats.bboxMin.y, stats.bboxMin.z)
+	local bboxTo = Position(stats.bboxMax.x, stats.bboxMax.y, stats.bboxMax.z)
+	local teleportEntries, exitTeleports, internalTeleports = classifyZoneTeleports(zone, bboxFrom, bboxTo)
+
+	local allEntryPositions = {}
+	local function posInList(list, x, y, z)
+		for _, p in ipairs(list) do
+			if p.x == x and p.y == y and p.z == z then return true end
+		end
+		return false
+	end
+	if result.entries then
+		for _, ep in ipairs(result.entries) do
+			allEntryPositions[#allEntryPositions + 1] = Position(ep.x, ep.y, ep.z)
+		end
+	end
+	for _, tp in ipairs(teleportEntries) do
+		local sx, sy, sz = tp.source.x, tp.source.y, tp.source.z
+		if not posInList(allEntryPositions, sx, sy, sz) then
+			allEntryPositions[#allEntryPositions + 1] = Position(sx, sy, sz)
+		end
+	end
+
+	local exitPos = nil
+	local exitIsBestGuess = false
+	if #exitTeleports > 0 then
+		local tp = exitTeleports[1]
+		exitPos = Position(tp.dest.x, tp.dest.y, tp.dest.z)
+	elseif result.entries and #result.entries > 0 then
+		local bestEntry = result.entries[1]
+		for _, ep in ipairs(result.entries) do
+			if ep.z < bestEntry.z then bestEntry = ep end
+		end
+		exitPos = Position(bestEntry.x, bestEntry.y, bestEntry.z)
+	elseif #teleportEntries > 0 then
+		exitPos = Position(teleportEntries[1].source.x, teleportEntries[1].source.y, teleportEntries[1].source.z)
+	else
+		exitPos = seedPos
+		exitIsBestGuess = true
+	end
+
+	return {
+		caveSeed = seedPos,
+		exitPos = exitPos,
+		exitIsBestGuess = exitIsBestGuess,
+		tiles = stats.tiles,
+		bboxMin = stats.bboxMin,
+		bboxMax = stats.bboxMax,
+		zLevels = stats.zLevels,
+		spawns = stats.spawns,
+		teleportEntries = teleportEntries,
+		exitTeleports = exitTeleports,
+		internalTeleports = internalTeleports,
+		allEntryPositions = allEntryPositions,
+		floodFillResult = result,
+		maxCaveTiles = maxTiles,
+		maxDistance = maxDistance,
+	}
 end
 
 -- ============================================================================
@@ -186,7 +415,9 @@ local function getSession(player)
 end
 
 local function clearSession(player)
-	sessions[player:getGuid()] = nil
+	local guid = player:getGuid()
+	Zone.removeByName("hunt._discover_" .. guid)
+	sessions[guid] = nil
 end
 
 -- ============================================================================
@@ -203,11 +434,21 @@ local function generateConfig(session)
 	table.insert(lines, string.format('    name = "%s",', session.name))
 	table.insert(lines, string.format('    caveSeed = %s,', fmtPos(session.caveSeed)))
 
-	local exitStr = session.exitPos and fmtPos(session.exitPos) or 'Position(0, 0, 7) -- TODO: set exit'
-	table.insert(lines, string.format('    exit = %s,', exitStr))
+	if session.exitPos then
+		if session.exitIsBestGuess then
+			table.insert(lines, string.format('    exit = %s, -- TODO: verify exit position', fmtPos(session.exitPos)))
+		else
+			table.insert(lines, string.format('    exit = %s,', fmtPos(session.exitPos)))
+		end
+	else
+		table.insert(lines, '    exit = Position(0, 0, 7), -- TODO: set exit')
+	end
 
 	if session.maxCaveTiles and session.maxCaveTiles ~= 5000 then
 		table.insert(lines, string.format('    maxCaveTiles = %d,', session.maxCaveTiles))
+	end
+	if session.maxDistance and session.maxDistance ~= 300 then
+		table.insert(lines, string.format('    maxDistance = %d,', session.maxDistance))
 	end
 
 	table.insert(lines, '    requiredLevel = 0,')
@@ -215,6 +456,31 @@ local function generateConfig(session)
 	table.insert(lines, '    maxInstances = 20,')
 	table.insert(lines, '})')
 	table.insert(lines, 'hunt:register()')
+
+	-- Append discovered entries/exits as comments for documentation
+	table.insert(lines, '')
+	if session.teleportEntries and #session.teleportEntries > 0 then
+		table.insert(lines, '-- Discovered teleport entries:')
+		for _, tp in ipairs(session.teleportEntries) do
+			table.insert(lines, string.format('--   (%d,%d,%d) -> (%d,%d,%d)',
+				tp.source.x, tp.source.y, tp.source.z,
+				tp.dest.x, tp.dest.y, tp.dest.z))
+		end
+	end
+	if session.exitTeleports and #session.exitTeleports > 0 then
+		table.insert(lines, '-- Discovered exit teleports:')
+		for _, tp in ipairs(session.exitTeleports) do
+			local src = tp.source or tp[1]
+			local dest = tp.dest or tp[2]
+			if src and dest then
+				table.insert(lines, string.format('--   (%d,%d,%d) -> (%d,%d,%d)',
+					src.x, src.y, src.z, dest.x, dest.y, dest.z))
+			end
+		end
+	end
+	if session.internalTeleports and #session.internalTeleports > 0 then
+		table.insert(lines, string.format('-- Internal teleports: %d', #session.internalTeleports))
+	end
 
 	return table.concat(lines, '\n')
 end
@@ -331,131 +597,217 @@ function huntHelper.onSay(player, words, param)
 			end
 		end
 
-		local maxTiles = tonumber(arg) or 5000
+		-- /hunt discover[, maxTiles[, maxDistance]]
+		-- maxTiles: hard cap on total zone tiles (default 5000)
+		-- maxDistance: Chebyshev distance cap from seed for the initial BFS (default 300)
+		--   300 tiles is enough for any normal cave while stopping BFS from crossing to
+		--   other cave systems at the same z-level (Port Hope z=8 <-> Venore z=8 is ~1200 tiles).
+		local params = arg:split("/")
+		local maxTiles = tonumber(params[1] and params[1]:trim()) or tonumber(arg) or 5000
+		local maxDistance = tonumber(params[2] and params[2]:trim()) or 300
+
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-			"[Hunt] Flood-filling from %s (max %d tiles)...", fmtPos(seedPos), maxTiles))
+			"[Hunt] Flood-filling from %s (max %d tiles, radius %d)...", fmtPos(seedPos), maxTiles, maxDistance))
 
 		-- Create a temporary zone for the flood-fill
 		local tempZoneName = "hunt._discover_" .. player:getGuid()
 		local tempZone = Zone(tempZoneName)
-		local result = tempZone:buildFromFloodFill(seedPos, maxTiles)
+		local result = tempZone:buildFromFloodFill(seedPos, maxTiles, maxDistance)
 
 		if not result or result.tiles == 0 then
 			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Flood-fill found 0 tiles. Position may be blocked or invalid.")
 			return true
 		end
 
+		local initialTiles = result.tilesAdded or result.tiles or 0
+
 		session.caveSeed = seedPos
 		session.floodFillResult = result
 		session.maxCaveTiles = maxTiles
+		session.maxDistance = maxDistance
+		-- Reset name so it's recalculated from the current discover result, not a stale prior run
+		session.name = nil
+		-- Save the original bbox from buildFromFloodFill (before the expansion loop potentially
+		-- inflates it) — used for naming so the dominant monster comes from the real cave z-level.
+		local namingBboxMin = result.bboxMin
+		local namingBboxMax = result.bboxMax
 
-		-- Store teleport data in session
-		session.teleportEntries = result.teleportEntries or {}
-		session.internalTeleports = result.internalTeleports or {}
-		session.exitTeleports = result.exitTeleports or {}
+		expandZoneConnections(tempZone, maxTiles)
 
-		-- Auto-detect exit: pick stair entry with lowest z, teleport entry source, or exit teleport dest
-		if result.entries and #result.entries > 0 then
-			local bestEntry = result.entries[1]
-			for _, ep in ipairs(result.entries) do
-				if ep.z < bestEntry.z then
-					bestEntry = ep
-				end
-			end
-			session.exitPos = Position(bestEntry.x, bestEntry.y, bestEntry.z)
-		elseif #session.teleportEntries > 0 then
-			local tp = session.teleportEntries[1]
-			session.exitPos = Position(tp.source.x, tp.source.y, tp.source.z)
-		elseif #session.exitTeleports > 0 then
-			local tp = session.exitTeleports[1]
-			session.exitPos = Position(tp.dest.x, tp.dest.y, tp.dest.z)
+		-- Recalculate result after expansion
+		local stats = computeZoneStats(tempZone)
+		if stats then
+			result.tiles = stats.tiles
+			result.bboxMin = stats.bboxMin
+			result.bboxMax = stats.bboxMax
+			result.zLevels = stats.zLevels
+			result.spawns = stats.spawns
 		end
 
-		-- Auto-name from dominant monster + nearest town
-		if not session.name then
-			if result.bboxMin and result.bboxMax then
-				local cx = math.floor((result.bboxMin.x + result.bboxMax.x) / 2)
-				local cy = math.floor((result.bboxMin.y + result.bboxMax.y) / 2)
-				session.name = autoNameFromBBox(
-					Position(result.bboxMin.x, result.bboxMin.y, result.bboxMin.z),
-					Position(result.bboxMax.x, result.bboxMax.y, result.bboxMax.z),
-					cx, cy)
-			else
-				local townName = getNearestTownName(seedPos.x, seedPos.y)
-				session.name = string.format("Cave - %s", townName)
-			end
+	-- Classify script teleports
+	session.teleportEntries = {}
+	session.internalTeleports = {}
+	session.exitTeleports = {}
+
+	if result.bboxMin and result.bboxMax then
+		local bboxFrom = Position(result.bboxMin.x, result.bboxMin.y, result.bboxMin.z)
+		local bboxTo = Position(result.bboxMax.x, result.bboxMax.y, result.bboxMax.z)
+		session.teleportEntries, session.exitTeleports, session.internalTeleports =
+			classifyZoneTeleports(tempZone, bboxFrom, bboxTo)
+	end
+
+	-- Unified entry positions for /hunt goto entries
+	session.allEntryPositions = {}
+	local function posAlreadyInList(list, x, y, z)
+		for _, p in ipairs(list) do
+			if p.x == x and p.y == y and p.z == z then return true end
 		end
-
-		-- Show results
-		local zStr = "?"
-		if result.zLevels then
-			local parts = {}
-			for _, z in ipairs(result.zLevels) do
-				table.insert(parts, tostring(z))
-			end
-			zStr = table.concat(parts, ",")
+		return false
+	end
+	if result.entries then
+		for _, ep in ipairs(result.entries) do
+			session.allEntryPositions[#session.allEntryPositions + 1] = Position(ep.x, ep.y, ep.z)
 		end
-
-		local totalEntries = (result.entries and #result.entries or 0) + #session.teleportEntries
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-			'[Hunt] Discovered: %d tiles, z=[%s], %d spawns, %d entries (%d stair, %d teleport), %d internal tp',
-			result.tiles, zStr, result.spawns, totalEntries,
-			result.entries and #result.entries or 0,
-			#session.teleportEntries,
-			#session.internalTeleports))
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-			'[Hunt] Name: "%s". Use /hunt name, <name> to change.', session.name))
-
-		if result.entries and #result.entries > 0 then
-			local entryList = {}
-			for i, ep in ipairs(result.entries) do
-				if i > 5 then
-					table.insert(entryList, "...")
-					break
-				end
-				table.insert(entryList, string.format("(%d,%d,%d)", ep.x, ep.y, ep.z))
-			end
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Stair entries: " .. table.concat(entryList, ", "))
+	end
+	for _, tp in ipairs(session.teleportEntries) do
+		local sx, sy, sz = tp.source.x, tp.source.y, tp.source.z
+		if not posAlreadyInList(session.allEntryPositions, sx, sy, sz) then
+			session.allEntryPositions[#session.allEntryPositions + 1] = Position(sx, sy, sz)
 		end
+	end
 
-		if #session.teleportEntries > 0 then
-			local tpList = {}
-			for i, tp in ipairs(session.teleportEntries) do
-				if i > 5 then
-					table.insert(tpList, "...")
-					break
-				end
-				table.insert(tpList, string.format("(%d,%d,%d)->(%d,%d,%d)",
-					tp.source.x, tp.source.y, tp.source.z,
-					tp.dest.x, tp.dest.y, tp.dest.z))
-			end
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Teleport entries: " .. table.concat(tpList, ", "))
+	-- Auto-detect exit
+	if #session.exitTeleports > 0 then
+		local tp = session.exitTeleports[1]
+		session.exitPos = Position(tp.dest.x, tp.dest.y, tp.dest.z)
+	elseif result.entries and #result.entries > 0 then
+		local bestEntry = result.entries[1]
+		for _, ep in ipairs(result.entries) do
+			if ep.z < bestEntry.z then bestEntry = ep end
 		end
+		session.exitPos = Position(bestEntry.x, bestEntry.y, bestEntry.z)
+	elseif #session.teleportEntries > 0 then
+		local tp = session.teleportEntries[1]
+		session.exitPos = Position(tp.source.x, tp.source.y, tp.source.z)
+	end
 
-		if #session.exitTeleports > 0 then
-			local tpList = {}
-			for i, tp in ipairs(session.exitTeleports) do
-				if i > 5 then
-					table.insert(tpList, "...")
-					break
-				end
-				table.insert(tpList, string.format("(%d,%d,%d)->(%d,%d,%d)",
-					tp.source.x, tp.source.y, tp.source.z,
-					tp.dest.x, tp.dest.y, tp.dest.z))
-			end
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Exit teleports: " .. table.concat(tpList, ", "))
-		end
-
-		if session.exitPos then
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Exit (auto): " .. fmtPos(session.exitPos))
+	-- Auto-name using the original buildFromFloodFill bbox (before expansion inflates it).
+	if not session.name then
+		if namingBboxMin and namingBboxMax then
+			local cx = math.floor((namingBboxMin.x + namingBboxMax.x) / 2)
+			local cy = math.floor((namingBboxMin.y + namingBboxMax.y) / 2)
+			session.name = autoNameFromBBox(
+				Position(namingBboxMin.x, namingBboxMin.y, namingBboxMin.z),
+				Position(namingBboxMax.x, namingBboxMax.y, namingBboxMax.z),
+				cx, cy)
 		else
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No exit detected. Use /hunt exit to set manually.")
+			local townName = getNearestTownName(seedPos.x, seedPos.y)
+			session.name = string.format("Cave - %s", townName)
 		end
+	end
 
-		if result.tiles >= maxTiles then
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-				"[Hunt] WARNING: Flood-fill hit tile limit (%d). Cave may be larger. Use /hunt discover, <higher limit> if needed.", maxTiles))
+	-- Monster breakdown: use original bbox for the query rectangle but filter by
+	-- actual zone membership so L-shaped caves don't include unrelated spawns.
+	local monsterBreakdown = {}
+	if namingBboxMin and namingBboxMax then
+		monsterBreakdown = getMonsterBreakdown(
+			Position(namingBboxMin.x, namingBboxMin.y, namingBboxMin.z),
+			Position(namingBboxMax.x, namingBboxMax.y, namingBboxMax.z),
+			tempZone)
+	end
+
+	-- ── Output ────────────────────────────────────────────────────────────────
+	local zStr = "?"
+	if result.zLevels then
+		local parts = {}
+		for _, z in ipairs(result.zLevels) do table.insert(parts, tostring(z)) end
+		zStr = table.concat(parts, ",")
+	end
+
+	local expandedTiles = result.tiles - initialTiles
+	local tileStr
+	if expandedTiles > 0 then
+		tileStr = string.format("%d tiles (%d initial + %d via script teleports)", result.tiles, initialTiles, expandedTiles)
+	else
+		tileStr = string.format("%d tiles", result.tiles)
+	end
+
+	local bboxW = (result.bboxMax and result.bboxMin) and (result.bboxMax.x - result.bboxMin.x + 1) or 0
+	local bboxH = (result.bboxMax and result.bboxMin) and (result.bboxMax.y - result.bboxMin.y + 1) or 0
+	local totalEntries = (result.entries and #result.entries or 0) + #session.teleportEntries
+
+	player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+		'[Hunt] Discovered: %s, z=[%s], bbox %dx%d',
+		tileStr, zStr, bboxW, bboxH))
+	player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+		'[Hunt] Spawns: %d total | Entries: %d (%d stair, %d teleport) | Internal tp: %d',
+		result.spawns, totalEntries,
+		result.entries and #result.entries or 0,
+		#session.teleportEntries,
+		#session.internalTeleports))
+	player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+		'[Hunt] Name: "%s". Use /hunt name, <name> to change.', session.name))
+
+	if #monsterBreakdown > 0 then
+		local parts = {}
+		for i, m in ipairs(monsterBreakdown) do
+			if i > 6 then
+				table.insert(parts, string.format("...+%d more types", #monsterBreakdown - 6))
+				break
+			end
+			table.insert(parts, string.format("%s x%d", m.name, m.count))
 		end
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Monsters: " .. table.concat(parts, ", "))
+	end
+
+	if result.entries and #result.entries > 0 then
+		local entryList = {}
+		for i, ep in ipairs(result.entries) do
+			if i > 5 then table.insert(entryList, "...") break end
+			table.insert(entryList, string.format("(%d,%d,%d)", ep.x, ep.y, ep.z))
+		end
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Stair entries: " .. table.concat(entryList, ", "))
+	end
+
+	if #session.teleportEntries > 0 then
+		local tpList = {}
+		for i, tp in ipairs(session.teleportEntries) do
+			if i > 5 then table.insert(tpList, "...") break end
+			table.insert(tpList, string.format("(%d,%d,%d)->(%d,%d,%d)",
+				tp.source.x, tp.source.y, tp.source.z,
+				tp.dest.x, tp.dest.y, tp.dest.z))
+		end
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Teleport entries: " .. table.concat(tpList, ", "))
+	end
+
+	if #session.exitTeleports > 0 then
+		local tpList = {}
+		for i, tp in ipairs(session.exitTeleports) do
+			if i > 5 then table.insert(tpList, "...") break end
+			table.insert(tpList, string.format("(%d,%d,%d)->(%d,%d,%d)",
+				tp.source.x, tp.source.y, tp.source.z,
+				tp.dest.x, tp.dest.y, tp.dest.z))
+		end
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Exit teleports: " .. table.concat(tpList, ", "))
+	end
+
+	if session.exitPos then
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Exit (auto): " .. fmtPos(session.exitPos))
+	else
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No exit detected. Use /hunt exit to set manually.")
+	end
+
+	if initialTiles >= maxTiles then
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[Hunt] WARNING: Initial fill hit tile limit (%d). Cave may be larger than shown. " ..
+			"Use /hunt discover, %d to increase, or /hunt discover, %d/%d to also expand radius.",
+			maxTiles, maxTiles * 2, maxTiles * 2, maxDistance))
+	end
+
+	player:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
+		"[Hunt] Validate: /hunt goto entries | /hunt goto exit | /hunt goto seed")
+	player:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
+		"[Hunt] Confirm: /hunt name, <name> | /hunt save")
 
 	-- =========================================================================
 	-- NAME
@@ -523,7 +875,13 @@ function huntHelper.onSay(player, words, param)
 		-- Build a temp zone and populate from it
 		local tempZoneName = "hunt._test_" .. player:getGuid()
 		local tempZone = Zone(tempZoneName)
-		tempZone:buildFromFloodFill(session.caveSeed, session.maxCaveTiles or 5000)
+		local testSeed = session.caveSeed
+		local testMaxTiles = session.maxCaveTiles or 5000
+		local testRadius = session.maxDistance or 300
+		local result = tempZone:buildFromFloodFill(testSeed, testMaxTiles, testRadius)
+
+		expandZoneConnections(tempZone, testMaxTiles)
+
 		local spawnCount = Game.populateInstanceFromZone(instanceId, tempZone)
 
 		player:changeInstance(instanceId)
@@ -541,21 +899,21 @@ function huntHelper.onSay(player, words, param)
 		local target = arg:lower()
 
 		if target == "entries" then
-			if not session.floodFillResult or not session.floodFillResult.entries or #session.floodFillResult.entries == 0 then
+			local entries = session.allEntryPositions
+			if not entries or #entries == 0 then
 				player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No entries detected.")
 				return true
 			end
-			local entries = session.floodFillResult.entries
-			session.gotoEntryIdx = (session.gotoEntryIdx % #entries) + 1
-			local ep = entries[session.gotoEntryIdx]
-			local entryPos = Position(ep.x, ep.y, ep.z)
+			local n = #entries
+			session.gotoEntryIdx = (session.gotoEntryIdx % n) + 1
+			local entryPos = entries[session.gotoEntryIdx]
 			local ok, actualPos = safeTeleport(player, entryPos)
 			if ok then
 				player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-					"[Hunt] Entry %d/%d: %s", session.gotoEntryIdx, #entries, fmtPos(actualPos)))
+					"[Hunt] Entry %d/%d: %s", session.gotoEntryIdx, n, fmtPos(actualPos)))
 			else
 				player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-					"[Hunt] Entry %d/%d: teleport failed at %s", session.gotoEntryIdx, #entries, fmtPos(entryPos)))
+					"[Hunt] Entry %d/%d: teleport failed at %s", session.gotoEntryIdx, n, fmtPos(entryPos)))
 			end
 
 		elseif target == "exit" then
@@ -652,8 +1010,7 @@ function huntHelper.onSay(player, words, param)
 			return true
 		end
 		local raw = arg ~= "" and arg or session.name
-		local filename = raw:lower():gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
-		local filepath = "data/scripts/movements/hunt_" .. filename .. ".lua"
+		local filepath = "data/scripts/movements/hunt_" .. sanitizeFilename(raw) .. ".lua"
 
 		local config = generateConfig(session)
 		local header = string.format("-- Hunt: %s\n-- Generated by /hunt save (flood-fill from %s)\n\n", session.name, fmtPos(session.caveSeed))
@@ -801,76 +1158,558 @@ function huntHelper.onSay(player, words, param)
 		end
 		local c = session.discoveries[n]
 
-		-- Use cluster center spawn as flood-fill seed
-		local seedPos
-		if c.centerSpawnPos then
-			seedPos = Position(c.centerSpawnPos.x, c.centerSpawnPos.y, c.centerSpawnPos.z)
-		else
-			seedPos = Position(
-				math.floor((c.fromPos.x + c.toPos.x) / 2),
-				math.floor((c.fromPos.y + c.toPos.y) / 2),
-				c.zLevels and c.zLevels[1] or c.fromPos.z)
-		end
-
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-			"[Hunt] Flood-filling from cluster #%d center: %s...", n, fmtPos(seedPos)))
+			"[Hunt] Flood-filling from cluster #%d...", n))
 
 		local tempZoneName = "hunt._discover_" .. player:getGuid()
-		local tempZone = Zone(tempZoneName)
-		local result = tempZone:buildFromFloodFill(seedPos, 5000)
-
-		if not result or result.tiles == 0 then
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Flood-fill found 0 tiles from cluster center.")
+		local result, reason = processCluster(c, tempZoneName)
+		if not result then
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format("[Hunt] Failed: %s", reason))
 			return true
 		end
 
-		session.caveSeed = seedPos
-		session.floodFillResult = result
-		session.maxCaveTiles = 5000
+		session.caveSeed = result.caveSeed
+		session.floodFillResult = result.floodFillResult
+		session.maxCaveTiles = result.maxCaveTiles
+		session.maxDistance = result.maxDistance
 		session.gotoEntryIdx = 0
-
-		-- Auto-name
+		session.teleportEntries = result.teleportEntries
+		session.exitTeleports = result.exitTeleports
+		session.internalTeleports = result.internalTeleports
+		session.allEntryPositions = result.allEntryPositions
 		session.name = c.autoName or string.format("Cave #%d", n)
-
-		-- Auto-exit from entries
-		if result.entries and #result.entries > 0 then
-			local bestEntry = result.entries[1]
-			for _, ep in ipairs(result.entries) do
-				if ep.z < bestEntry.z then
-					bestEntry = ep
-				end
-			end
-			session.exitPos = Position(bestEntry.x, bestEntry.y, bestEntry.z)
-		end
+		session.exitPos = result.exitPos
 
 		local zStr = "?"
 		if result.zLevels then
 			local parts = {}
-			for _, z in ipairs(result.zLevels) do
-				table.insert(parts, tostring(z))
-			end
+			for _, z in ipairs(result.zLevels) do table.insert(parts, tostring(z)) end
 			zStr = table.concat(parts, ",")
 		end
 
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
 			'[Hunt] Accepted #%d "%s": %d tiles, z=[%s], %d spawns, %d entries.',
-			n, session.name, result.tiles, zStr, result.spawns, result.entries and #result.entries or 0))
+			n, session.name, result.tiles, zStr, result.spawns,
+			result.floodFillResult.entries and #result.floodFillResult.entries or 0))
 		if session.exitPos then
 			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Exit (auto): " .. fmtPos(session.exitPos))
 		end
+		if result.exitIsBestGuess then
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] WARNING: No exit detected, using seed as fallback. Use /hunt exit to set manually.")
+		end
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Use /hunt goto entries/exit/seed to validate. /hunt save to write config.")
+
+	-- =========================================================================
+	-- CATALOG: collect cluster data with NO flood-fill and write a catalog file.
+	-- Fast (seconds). Lets the user pick which caves to actually register,
+	-- then use /hunt batch ids=<list> for targeted flood-fill.
+	--
+	-- Usage: /hunt catalog[, zN-M][, expN][, minS]
+	-- Example: /hunt catalog, z8-15, exp2000, 20
+	-- =========================================================================
+	elseif action == "catalog" then
+		local minZ = 8
+		local maxZ = 15
+		local minSpawns = 0
+		local minExp = 0
+
+		local catArgs = param:split(",")
+		for i = 2, #catArgs do
+			local a = catArgs[i]:trim():lower()
+			local expVal = a:match("^exp(%d+)$")
+			if expVal then
+				minExp = tonumber(expVal)
+			else
+				local zMin, zMax = a:match("^z(%d+)-(%d+)$")
+				if zMin then
+					minZ = tonumber(zMin)
+					maxZ = tonumber(zMax)
+				else
+					local zMatch = a:match("^z(%d+)$")
+					if zMatch then
+						minZ = tonumber(zMatch)
+						maxZ = tonumber(zMatch)
+					elseif tonumber(a) then
+						minSpawns = tonumber(a)
+					end
+				end
+			end
+		end
+
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[Hunt] Building catalog (z%d-%d, minSpawns=%d, minExp=%d)...",
+			minZ, maxZ, minSpawns, minExp))
+
+		local clusters = Game.discoverSpawnClusters(minZ, maxZ, "")
+		if not clusters or #clusters == 0 then
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No clusters found.")
+			return true
+		end
+
+		-- Cache towns once — getNearestTownName calls Game.getTowns() every invocation.
+		local towns = Game.getTowns()
+		local townCache = {}
+		for _, town in ipairs(towns) do
+			local tp = town:getTemplePosition()
+			townCache[#townCache + 1] = { name = town:getName(), x = tp.x, y = tp.y }
+		end
+		local function nearestTownCached(cx, cy)
+			local best, bestDist = "Unknown", math.huge
+			for _, t in ipairs(townCache) do
+				local d = (t.x - cx) * (t.x - cx) + (t.y - cy) * (t.y - cy)
+				if d < bestDist then bestDist = d; best = t.name end
+			end
+			return best
+		end
+
+		-- Quality tier based on dominant monster exp
+		local function qualityTier(exp)
+			if exp >= 5000 then return "S"
+			elseif exp >= 2000 then return "A"
+			elseif exp >= 1000 then return "B"
+			else return "C" end
+		end
+
+		-- Process each cluster (no flood-fill — pure data from discoverSpawnClusters)
+		local rows = {}
+		local skippedCount = 0
+		for i, cluster in ipairs(clusters) do
+			local dominant = cluster.monsters and cluster.monsters[1] and cluster.monsters[1].name or nil
+			local domExp = 0
+			if dominant then
+				local mt = MonsterType(dominant)
+				domExp = mt and mt:experience() or 0
+			end
+
+			if (cluster.spawns or 0) < minSpawns or domExp < minExp then
+				skippedCount = skippedCount + 1
+			else
+				local cx = math.floor((cluster.fromPos.x + cluster.toPos.x) / 2)
+				local cy = math.floor((cluster.fromPos.y + cluster.toPos.y) / 2)
+				local cz = cluster.zLevels and cluster.zLevels[1] or cluster.fromPos.z
+				local bboxW = cluster.toPos.x - cluster.fromPos.x + 1
+				local bboxH = cluster.toPos.y - cluster.fromPos.y + 1
+				local town = nearestTownCached(cx, cy)
+				local autoName = dominant
+					and string.format("%s - %s", dominant, town)
+					or string.format("Cave - %s", town)
+
+				local zStr = ""
+				if cluster.zLevels then
+					local parts = {}
+					for _, z in ipairs(cluster.zLevels) do parts[#parts + 1] = tostring(z) end
+					zStr = table.concat(parts, ",")
+				end
+
+				-- Top-3 monsters for detail line
+				local monParts = {}
+				for j, m in ipairs(cluster.monsters or {}) do
+					if j > 3 then monParts[#monParts + 1] = "..."; break end
+					monParts[#monParts + 1] = string.format("%s(%d)", m.name, m.count)
+				end
+				local monStr = table.concat(monParts, "; ")
+
+				rows[#rows + 1] = {
+					id = i,
+					name = autoName,
+					spawns = cluster.spawns or 0,
+					domExp = domExp,
+					tier = qualityTier(domExp),
+					zStr = zStr,
+					bboxW = bboxW,
+					bboxH = bboxH,
+					cx = cx, cy = cy, cz = cz,
+					monStr = monStr,
+					numZLevels = cluster.zLevels and #cluster.zLevels or 1,
+				}
+			end
+		end
+
+		-- Sort by dominant exp descending (highest value first)
+		table.sort(rows, function(a, b) return a.domExp > b.domExp end)
+
+		-- ── Write formatted text catalog ──────────────────────────────────────
+		local TXT_PATH = "data/hunt_catalog.txt"
+		local CSV_PATH = "data/hunt_catalog.csv"
+
+		local txtLines = {}
+		txtLines[#txtLines + 1] = string.format(
+			"=== Hunt Catalog | z%d-%d | %d clusters → %d listed (sorted by exp) ===",
+			minZ, maxZ, #clusters, #rows)
+		txtLines[#txtLines + 1] = string.format(
+			"%-5s %-4s %-7s %-6s %-16s %-11s %s",
+			"ID", "Tier", "Spawns", "DomExp", "Z-Levels", "BboxWxH", "Name")
+		txtLines[#txtLines + 1] = string.rep("-", 100)
+
+		local csvLines = {}
+		csvLines[#csvLines + 1] = "id,name,spawns,dominant_exp,tier,z_levels,bbox_w,bbox_h,center_x,center_y,center_z,z_count,monsters"
+
+		for _, row in ipairs(rows) do
+			-- Text: summary line + monster detail line
+			txtLines[#txtLines + 1] = string.format(
+				"%-5d %-4s %-7d %-6d %-16s %-11s %s",
+				row.id, row.tier, row.spawns, row.domExp, row.zStr,
+				row.bboxW .. "x" .. row.bboxH, row.name)
+			txtLines[#txtLines + 1] = string.format(
+				"      center=(%d,%d,%d)  monsters: %s",
+				row.cx, row.cy, row.cz, row.monStr)
+
+			-- CSV row
+			local csvName = '"' .. row.name:gsub('"', '""') .. '"'
+			local csvMons = '"' .. row.monStr:gsub('"', '""') .. '"'
+			csvLines[#csvLines + 1] = string.format(
+				"%d,%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%s",
+				row.id, csvName, row.spawns, row.domExp, row.tier, row.zStr,
+				row.bboxW, row.bboxH, row.cx, row.cy, row.cz, row.numZLevels, csvMons)
+		end
+
+		txtLines[#txtLines + 1] = ""
+		txtLines[#txtLines + 1] = string.format(
+			"Skipped: %d (below filters). Total scanned: %d.", skippedCount, #clusters)
+		txtLines[#txtLines + 1] = ""
+		txtLines[#txtLines + 1] = "To flood-fill and save specific clusters:"
+		txtLines[#txtLines + 1] = "  /hunt batch, ids=10 18 63 68, 20/500"
+
+		local f = io.open(TXT_PATH, "w")
+		if f then f:write(table.concat(txtLines, "\n") .. "\n"); f:close() end
+
+		local g = io.open(CSV_PATH, "w")
+		if g then g:write(table.concat(csvLines, "\n") .. "\n"); g:close() end
+
+		-- Store in session so /hunt goto <N> works immediately
+		autoNameClusters(clusters)
+		session.discoveries = clusters
+
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[Hunt] Catalog ready: %d clusters listed (%d skipped). Written to:",
+			#rows, skippedCount))
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.txt  (sorted by exp, human-readable)")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.csv  (importable into spreadsheet)")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
+			"[Hunt] Pick IDs, then: /hunt batch, ids=3 10 18 63, 20/500")
+
+	-- =========================================================================
+	-- BATCH: automated scan + accept + save for all qualifying clusters
+	-- Uses addEvent to process one cluster per tick so the server stays responsive.
+	-- =========================================================================
+	elseif action == "batch" then
+		local dryRun = false
+		local requireExit = false
+		local minSpawns = 5
+		local minTiles = 50
+		local minZ = 8
+		local maxZ = 15
+		local minExp = 0
+		local selectedIds = nil  -- if set, only process these cluster IDs
+
+		local batchArgs = param:split(",")
+		for i = 2, #batchArgs do
+			local a = batchArgs[i]:trim()
+			local aLower = a:lower()
+			if aLower == "dry" then
+				dryRun = true
+			elseif aLower == "requireexit" then
+				requireExit = true
+			else
+				-- ids=3 10 18 63  OR  ids=3,10,18,63 (already split by comma so each a is one id)
+				-- ids= can appear as a single arg "ids=3 10 18" (space-separated in one token)
+				local idsStr = a:match("^[Ii][Dd][Ss]=(.+)$")
+				if idsStr then
+					selectedIds = {}
+					for idStr in idsStr:gmatch("%d+") do
+						selectedIds[tonumber(idStr)] = true
+					end
+				elseif aLower:match("^exp(%d+)$") then
+					minExp = tonumber(aLower:match("^exp(%d+)$"))
+				else
+					local zMin, zMax = aLower:match("^z(%d+)-(%d+)$")
+					if zMin then
+						minZ = tonumber(zMin)
+						maxZ = tonumber(zMax)
+					else
+						local zMatch = aLower:match("^z(%d+)$")
+						if zMatch then
+							minZ = tonumber(zMatch)
+							maxZ = tonumber(zMatch)
+						else
+							local sMin, sTiles = aLower:match("^(%d+)/(%d+)$")
+							if sMin then
+								minSpawns = tonumber(sMin)
+								minTiles = tonumber(sTiles)
+							elseif tonumber(aLower) then
+								minSpawns = tonumber(aLower)
+							end
+						end
+					end
+				end
+			end
+		end
+
+		local filterStr = string.format("z%d-%d, min %d spawns, min %d tiles", minZ, maxZ, minSpawns, minTiles)
+		if minExp > 0 then filterStr = filterStr .. string.format(", min %d exp", minExp) end
+		if requireExit then filterStr = filterStr .. ", requireexit" end
+		if selectedIds then
+			local idList = {}
+			for id, _ in pairs(selectedIds) do idList[#idList + 1] = tostring(id) end
+			table.sort(idList, function(a, b) return tonumber(a) < tonumber(b) end)
+			filterStr = filterStr .. " | targeted IDs: " .. table.concat(idList, ",")
+		end
+
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[Hunt] Batch %s: scanning clusters (%s)...",
+			dryRun and "DRY RUN" or "SAVE", filterStr))
+
+		local clusters
+		-- If we have a prior scan in session and ids= is specified, reuse it to skip discoverSpawnClusters
+		if selectedIds and session.discoveries and #session.discoveries > 0 then
+			clusters = session.discoveries
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+				"[Hunt] Reusing cached scan (%d clusters). Filtering to selected IDs.", #clusters))
+		else
+			clusters = Game.discoverSpawnClusters(minZ, maxZ, "")
+		end
+
+		if not clusters or #clusters == 0 then
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No clusters found.")
+			return true
+		end
+		autoNameClusters(clusters, not dryRun)
+
+		local BATCH_LOG_PATH = "data/hunt_batch_results.txt"
+
+		-- Truncate/init the log file for this run
+		local initLog = io.open(BATCH_LOG_PATH, "w")
+		if initLog then
+			initLog:write(string.format("=== /hunt batch %s started: %d clusters, %s ===\n",
+				dryRun and "DRY RUN" or "SAVE", #clusters, filterStr))
+			initLog:close()
+		end
+
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[Hunt] Found %d clusters. Running headlessly — results in data/hunt_batch_results.txt. You can disconnect.", #clusters))
+
+		local state = {
+			clusters = clusters,
+			idx = 1,
+			saved = 0,
+			skipped = 0,
+			skipReasons = { small = 0, exists = 0, overlap = 0, tiles = 0, failed = 0, lowExp = 0, noexit = 0 },
+			batchZones = {},
+			dryRun = dryRun,
+			requireExit = requireExit,
+			selectedIds = selectedIds,
+			minSpawns = minSpawns,
+			minTiles = minTiles,
+			minExp = minExp,
+			playerId = player:getId(),
+		}
+
+		local function batchLog(s, line)
+			local f = io.open(BATCH_LOG_PATH, "a")
+			if f then f:write(line .. "\n"); f:close() end
+			local p = Player(s.playerId)
+			if p then p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, line) end
+		end
+
+		local function batchFinish(s)
+			for _, zoneName in ipairs(s.batchZones) do
+				Zone.removeByName(zoneName)
+			end
+			local skipParts = {}
+			if s.skipReasons.small > 0 then table.insert(skipParts, s.skipReasons.small .. " too few spawns") end
+			if s.skipReasons.lowExp > 0 then table.insert(skipParts, s.skipReasons.lowExp .. " low exp") end
+			if s.skipReasons.tiles > 0 then table.insert(skipParts, s.skipReasons.tiles .. " too few tiles") end
+			if s.skipReasons.exists > 0 then table.insert(skipParts, s.skipReasons.exists .. " already exist") end
+			if s.skipReasons.overlap > 0 then table.insert(skipParts, s.skipReasons.overlap .. " overlap") end
+			if s.skipReasons.noexit > 0 then table.insert(skipParts, s.skipReasons.noexit .. " no exit") end
+			if s.skipReasons.failed > 0 then table.insert(skipParts, s.skipReasons.failed .. " failed") end
+			local skipStr = #skipParts > 0 and (" (" .. table.concat(skipParts, ", ") .. ")") or ""
+			local summary
+			if s.dryRun then
+				summary = string.format(
+					"[Hunt] Dry run complete: %d would be saved, %d skipped%s.",
+					s.saved, s.skipped, skipStr)
+			else
+				summary = string.format(
+					"[Hunt] Batch complete: %d saved, %d skipped%s. Use /reload scripts to activate.",
+					s.saved, s.skipped, skipStr)
+			end
+			batchLog(s, summary)
+			print("[Hunt] Batch finished: " .. summary)
+		end
+
+		local function batchProcessNext(s)
+			if s.idx > #s.clusters then
+				batchFinish(s)
+				return
+			end
+
+			-- Continue headlessly even if player disconnected
+			local p = Player(s.playerId)
+
+			local i = s.idx
+			s.idx = s.idx + 1
+			local cluster = s.clusters[i]
+			local name = cluster.autoName or "Unknown"
+
+			-- If ids= was specified, skip any cluster not in the selected set
+			if s.selectedIds and not s.selectedIds[i] then
+				addEvent(batchProcessNext, 10, s)
+				return
+			end
+
+			if i % 10 == 1 then
+				local msg = string.format("[Hunt] Processing %d/%d...", i, #s.clusters)
+				if p then p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, msg) end
+				print(msg)
+			end
+
+			-- Quality gate: min spawns
+			if (cluster.spawns or 0) < s.minSpawns then
+				s.skipped = s.skipped + 1
+				s.skipReasons.small = s.skipReasons.small + 1
+				addEvent(batchProcessNext, 50, s)
+				return
+			end
+
+			-- Quality gate: dominant monster experience
+			if s.minExp > 0 and cluster.monsters and #cluster.monsters > 0 then
+				local dominant = cluster.monsters[1].name
+				local mt = MonsterType(dominant)
+				local exp = mt and mt:experience() or 0
+				if exp < s.minExp then
+					s.skipped = s.skipped + 1
+					s.skipReasons.lowExp = s.skipReasons.lowExp + 1
+					addEvent(batchProcessNext, 50, s)
+					return
+				end
+			end
+
+			-- Quality gate: file already exists
+			if not s.dryRun and huntFileExists(name) then
+				s.skipped = s.skipped + 1
+				s.skipReasons.exists = s.skipReasons.exists + 1
+				addEvent(batchProcessNext, 50, s)
+				return
+			end
+
+			-- Overlap detection
+			local seedPos
+			if cluster.centerSpawnPos then
+				seedPos = Position(cluster.centerSpawnPos.x, cluster.centerSpawnPos.y, cluster.centerSpawnPos.z)
+			else
+				seedPos = Position(
+					math.floor((cluster.fromPos.x + cluster.toPos.x) / 2),
+					math.floor((cluster.fromPos.y + cluster.toPos.y) / 2),
+					cluster.zLevels and cluster.zLevels[1] or cluster.fromPos.z)
+			end
+			for _, prevZoneName in ipairs(s.batchZones) do
+				local prevZone = Zone(prevZoneName)
+				if prevZone:contains(seedPos) then
+					s.skipped = s.skipped + 1
+					s.skipReasons.overlap = s.skipReasons.overlap + 1
+					addEvent(batchProcessNext, 50, s)
+					return
+				end
+			end
+
+			-- Heavy work: flood-fill + expansion (blocks thread ~1.5-2s)
+			local tempZoneName = string.format("hunt._batch_%d", i)
+			local result, reason = processCluster(cluster, tempZoneName)
+			if not result then
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.failed = s.skipReasons.failed + 1
+				addEvent(batchProcessNext, 2000, s)
+				return
+			end
+
+			if result.tiles < s.minTiles then
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.tiles = s.skipReasons.tiles + 1
+				addEvent(batchProcessNext, 2000, s)
+				return
+			end
+
+			-- Quality gate: requireexit — skip caves where exit detection failed
+			if s.requireExit and result.exitIsBestGuess then
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.noexit = s.skipReasons.noexit + 1
+				batchLog(s, string.format("[Batch] #%d %s: SKIP (no exit detected)", i, name))
+				addEvent(batchProcessNext, 2000, s)
+				return
+			end
+
+			table.insert(s.batchZones, tempZoneName)
+
+			local zStr = "?"
+			if result.zLevels then
+				local parts = {}
+				for _, z in ipairs(result.zLevels) do table.insert(parts, tostring(z)) end
+				zStr = table.concat(parts, ",")
+			end
+
+			local batchSession = {
+				name = name,
+				caveSeed = result.caveSeed,
+				exitPos = result.exitPos,
+				exitIsBestGuess = result.exitIsBestGuess,
+				teleportEntries = result.teleportEntries,
+				exitTeleports = result.exitTeleports,
+				internalTeleports = result.internalTeleports,
+				maxCaveTiles = result.maxCaveTiles,
+				maxDistance = result.maxDistance,
+			}
+
+			if s.dryRun then
+				local tag = result.exitIsBestGuess and "DRY (no exit)" or "DRY OK"
+				batchLog(s, string.format(
+					"[Batch] #%d %s: %d tiles, z=[%s], %d spawns -> %s",
+					i, name, result.tiles, zStr, result.spawns, tag))
+				s.saved = s.saved + 1
+			else
+				local config = generateConfig(batchSession)
+				local header = string.format(
+					"-- Hunt: %s\n-- Generated by /hunt batch (flood-fill from %s)\n\n",
+					name, fmtPos(result.caveSeed))
+				local filepath = "data/scripts/movements/hunt_" .. sanitizeFilename(name) .. ".lua"
+				local file = io.open(filepath, "w")
+				if file then
+					file:write(header .. config .. "\n")
+					file:close()
+					batchLog(s, string.format(
+						"[Batch] #%d %s: %d tiles, z=[%s] -> SAVED",
+						i, name, result.tiles, zStr))
+					s.saved = s.saved + 1
+				else
+					batchLog(s, string.format(
+						"[Batch] #%d %s: WRITE FAILED (%s)", i, name, filepath))
+					s.skipped = s.skipped + 1
+					s.skipReasons.failed = s.skipReasons.failed + 1
+				end
+			end
+
+			addEvent(batchProcessNext, 2000, s)
+		end
+
+		addEvent(batchProcessNext, 3000, state)
 
 	-- =========================================================================
 	-- HELP
 	-- =========================================================================
 	else
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Commands: (discovery)")
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt discover[, maxTiles]  flood-fill from stair/hole or current pos")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt discover[, maxTiles[/maxDistance]]  flood-fill from stair/hole")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt scan[, filter]        global grid scan (browse clusters)")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt list[, page]          browse scanned clusters")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt nearby                10 nearest clusters")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt goto, <N>             teleport to cluster N")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt accept, <N>           flood-fill from cluster N center")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Commands: (bulk - recommended workflow)")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt catalog[, zN-M][, expN][, minS]   fast catalog, no flood-fill")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt batch[, dry][, ids=3 10 18][, N/T][, zN-M][, expN][, requireexit]")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Commands: (editing)")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt name, <name>          set hunt name")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt exit                  set exit position")
