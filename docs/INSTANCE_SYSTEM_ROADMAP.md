@@ -3,8 +3,8 @@
 > **Project:** Instanced Hunts & Bosses for Crystal Server + OTClient
 > **Version:** 2.0
 > **Created:** 2026-01-28
-> **Last updated:** 2026-02-07
-> **Status:** Active development
+> **Last updated:** 2026-04-05
+> **Status:** Active development — Hunt infrastructure complete, testing phase
 
 ---
 
@@ -89,11 +89,28 @@ Full isolation by `instanceId` on all creatures:
 - `/instanceui` god command for debugging
 - Live reload enabled on client
 
-### 2.5 Already Working (no action needed)
+### 2.5 Hunt Instance Discovery & Zone Building
+
+Full GM workflow for discovering and registering hunt caves:
+
+- **`/hunt discover`** — flood-fill from stairs/holes/teleports with expansion via script teleports
+- **BFS:** 4-neighbor, Chebyshev distance cap, same-Z only (C++)
+- **Expansion loop:** follows `ScriptTeleportRegistry` entries, fixed search radius
+- **`ScriptTeleportRegistry`** — sector-based spatial index (32x32), lazy-populated from `TeleportUnique`
+- **Auto-naming:** dominant monster + nearest town
+- **Monster breakdown:** zone-filtered (not just bbox)
+- **`/hunt test`** — creates real instance for validation
+- **`/hunt save`** — generates `data/scripts/movements/hunt_<name>.lua`
+- **Deferred zone building** — `_pendingZones` + `mapOnLoad` callback
+- **Zone cleanup** — `Zone.removeByName()` on session clear
+- **`Tile:getFloorchangeDestination()`** — C++ binding exposed to Lua
+- **1 hunt registered:** Flimsy Lost Soul - Blue Valley (3923 initial + expansion)
+
+### 2.6 Already Working (no action needed)
 
 - Monsters in instances — spawn and timers configured at instance creation
 - NPCs in instances — functional
-- **Note:** cleanup of ended instances needs review
+- Instance cleanup — implemented via `cleanupInstance()` with grace period
 
 ---
 
@@ -197,49 +214,71 @@ Each hunt is a pre-defined zone with:
 
 ## 4. Implementation Phases
 
-### Phase 1: Instance Hunt Infrastructure (MVP)
+### Phase 0: Hunt Discovery & Zone Infrastructure — COMPLETE
+
+- [x] C++ `Zone::buildFromFloodFill` with 8-neighbor BFS (cardinal + diagonal), distance cap
+- [x] C++ `Zone::expandFromFloodFill` for additive expansion (8-neighbor)
+- [x] C++ `computeFloorchangeDestination` exposed to Lua
+- [x] C++ `Zone::removeZone` for dynamic zone cleanup
+- [x] Lua `ScriptTeleportRegistry` with sector-based spatial index
+- [x] Lua `HuntInstance` class with deferred zone building
+- [x] Lua `/hunt` GM command (discover, name, test, save workflow)
+- [x] Lua expansion loop — follows script teleports + floor changes cross-z, no distance cap on destinations
+- [x] Deferred build via `mapOnLoad` callback
+- [x] 1 hunt registered (Flimsy Lost Soul - Blue Valley)
+- [x] Exit teleport classification (both source-in-area and dest-in-area queries)
+
+### Phase 0.5: Hunt Registration — IN PROGRESS
+
+- [x] Bulk triage tooling: `/hunt catalog` (CSV/TXT, no flood-fill), `/hunt batch, ids=...`, `requireexit` flag (2026-04)
+- [ ] Register 10+ hunts across different level ranges via `/hunt discover` + `/hunt save` (or catalog → targeted batch)
+- [ ] Validate each hunt in-game (test instance, walk through, check z-levels)
+
+### Phase 1: Instance Hunt Infrastructure (MVP) — NEXT
 
 **Server (Lua):**
 
-- Create `InstanceHunt` class in `data/libs/functions/instance_hunt.lua`
-- Registry of available hunts (name, area, level req, monsters, cost)
-- Selection and instance creation when player chooses a hunt
-- Instance Stamina timer (decrement, warning, kick)
+- [ ] Gold coin entry cost — `entryCost` field in HuntInstance config, validate/deduct on `onStepIn`
+- [ ] Hunt selection API — opcode for client to request available hunts list
+- [ ] Instance Stamina timer (decrement per second, warning at 5min, kick at 0)
+- [ ] Per-hunt cooldown enforcement
 
 **Server (C++ if needed):**
 
-- `instanceStamina` attribute on Player (database persistence)
-- Offline stamina regeneration
+- [ ] `instanceStamina` attribute on Player (database persistence)
+- [ ] Offline stamina regeneration calculation
+- [ ] DB migration for `player_instance_stamina` table
 
 **Client:**
 
-- Expand `game_instance` or create `game_instance_hunt` with selection menu
-- Hunt list with info (name, level, cost, remaining stamina)
-- Instance Stamina bar
+- [ ] Expand `game_instance` or create `game_instance_hunt` with selection menu
+- [ ] Hunt list with info (name, level, cost, remaining stamina)
+- [ ] Instance Stamina bar (separate from normal stamina)
 
 ### Phase 2: UI Polish and Features
 
-- Polished UI similar to Prey (hunt grid, zone preview, monster outfits)
-- Stamina bar integrated in HUD
-- Transition animations (fadeIn/fadeOut on enter/exit)
-- Cooldown display
-- Recent hunts history
+- [ ] Polished UI similar to Prey (hunt grid, zone preview, monster outfits)
+- [ ] Stamina bar integrated in HUD
+- [ ] Transition animations (fadeIn/fadeOut on enter/exit)
+- [ ] Cooldown display
+- [ ] Recent hunts history
 
 ### Phase 3: Testing and Balancing
 
-- Test existing game functions inside instances (stairs, holes, NPCs, quests)
-- Stress test with multiple simultaneous instances
-- Stamina balancing (is 6h enough? fair regeneration?)
-- Economic balancing (entry cost vs obtained loot)
-- Instance cleanup review (memory leaks, orphan monsters)
+- [ ] Register 10+ hunts across different level ranges
+- [ ] Test existing game functions inside instances (stairs, holes, NPCs, quests)
+- [ ] Stress test with multiple simultaneous instances
+- [ ] Stamina balancing (is 6h enough? fair regeneration?)
+- [ ] Economic balancing (entry cost vs obtained loot)
+- [ ] Instance cleanup review (memory leaks, orphan monsters)
 
 ### Phase 4: Production
 
-- Global hard caps (max simultaneous instances)
-- Metrics and monitoring (`/metrics` command)
-- Feature flag (enable/disable without recompilation)
-- Final documentation
-- Database migrations
+- [ ] Global hard caps (max simultaneous instances)
+- [ ] Metrics and monitoring (`/metrics` command)
+- [ ] Feature flag (enable/disable without recompilation)
+- [ ] Final documentation
+- [ ] Database migrations
 
 ---
 
@@ -249,9 +288,21 @@ Each hunt is a pre-defined zone with:
 
 | File | Purpose |
 |------|---------|
-| `data/libs/functions/raid_instance.lua` | `InstanceRegistry` + `RaidInstance` class + `INSTANCE_OPCODE = 210` |
+| `src/game/instances/instance_manager.{hpp,cpp}` | `InstanceManager` + `WorldInstance` — create/destroy/populate instances |
+| `src/game/zones/zone.{hpp,cpp}` | `Zone` class — BFS flood-fill, expansion, `computeFloorchangeDestination` |
+| `src/lua/functions/core/game/zone_functions.{hpp,cpp}` | Zone Lua bindings (buildFromFloodFill, expandFromFloodFill, removeByName) |
+| `src/lua/functions/core/game/game_functions.{hpp,cpp}` | Game Lua bindings (createInstance, populateInstanceFromZone, etc.) |
+| `src/lua/functions/map/tile_functions.{hpp,cpp}` | Tile Lua bindings (getFloorchangeDestination) |
+| `data/libs/functions/hunt_instance.lua` | `HuntInstance` class — zone building, instance lifecycle, deferred build |
+| `data/libs/functions/instance_registry.lua` | `InstanceRegistry` — shared by hunts, raids, bosses |
+| `data/libs/functions/teleport.lua` | `ScriptTeleportRegistry` with sector-based spatial index |
+| `data/libs/functions/teleport_registry_extra.lua` | Manual teleport registrations for unregistered scripts |
+| `data/libs/functions/raid_instance.lua` | `RaidInstance` class + `INSTANCE_OPCODE = 210` |
 | `data/libs/functions/boss_lever.lua` | `BossLever` class with `instanced` flag |
-| `data/scripts/creaturescripts/others/instance_opcode.lua` | ExtendedOpcode handler for client "fetch" requests |
+| `data/scripts/talkactions/gm/hunt_zone_helper.lua` | `/hunt` GM command — discover, test, save workflow |
+| `data/scripts/eventcallbacks/hunt_main_map_on_load.lua` | Deferred zone build trigger (`mapOnLoad`) |
+| `data/scripts/movements/hunt_*.lua` | Individual hunt registrations (generated by `/hunt save`) |
+| `data/scripts/creaturescripts/others/instance_opcode.lua` | ExtendedOpcode handler for client UI |
 | `data/scripts/creaturescripts/player/login.lua` | Registers `InstanceOpcode` event on player login |
 | `data/scripts/talkactions/god/instanceui.lua` | `/instanceui` god command for testing |
 | `data/scripts/movements/raid_instance_gaz_haragoth.lua` | Gaz'Haragoth raid instance config |
@@ -276,6 +327,23 @@ Each hunt is a pre-defined zone with:
 | `modules/game_prey/prey.lua` (OTClient) | Client-side prey UI (1926 lines) |
 | `modules/game_prey/prey.otui` (OTClient) | Prey UI layout (845 lines) |
 | `docs/PREY_SYSTEM_ANALYSIS.md` | Full Prey system analysis |
+
+---
+
+### AI Workflow & Documentation
+
+| File | Purpose |
+|------|---------|
+| `.cursor/rules/crystal-coordinator.mdc` | Session bootstrap — always-apply rule, key file locations |
+| `.cursor/rules/crystal-cpp.mdc` | C++ conventions, Lua binding patterns, common pitfalls |
+| `.cursor/rules/crystal-lua.mdc` | Lua conventions, loading order, key APIs |
+| `.cursor/rules/instance-system.mdc` | Instance architecture context for relevant files |
+| `.cursor/skills/session-manager/SKILL.md` | Session start/end protocol, handoff, learning log |
+| `.cursor/skills/hunt-instance-dev/SKILL.md` | Hunt development workflow, testing checklist, pitfalls |
+| `docs/ARCHITECTURE.md` | Complete system architecture reference |
+| `docs/HANDOFF.md` | Living state document — updated each session |
+| `docs/SESSION_LOG.md` | Append-only learning journal |
+| `docs/hunt_discover_review_fixes.md` | Review/fix tracking for hunt discover flow |
 
 ---
 
