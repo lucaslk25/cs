@@ -1236,157 +1236,172 @@ function huntHelper.onSay(player, words, param)
 			end
 		end
 
+		local playerId = player:getId()
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
 			"[Hunt] Building catalog (z%d-%d, minSpawns=%d, minExp=%d)...",
 			minZ, maxZ, minSpawns, minExp))
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
+			"[Hunt] Running headlessly — results in data/hunt_catalog.txt. You can disconnect safely.")
 
 		local clusters = Game.discoverSpawnClusters(minZ, maxZ, "")
 		if not clusters or #clusters == 0 then
-			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No clusters found.")
+			local p = Player(playerId)
+			if p then p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] No clusters found.") end
+			print("[Hunt] Catalog: no clusters found.")
 			return true
 		end
 
-		-- Cache towns once — getNearestTownName calls Game.getTowns() every invocation.
-		local towns = Game.getTowns()
-		local townCache = {}
-		for _, town in ipairs(towns) do
-			local tp = town:getTemplePosition()
-			townCache[#townCache + 1] = { name = town:getName(), x = tp.x, y = tp.y }
-		end
-		local function nearestTownCached(cx, cy)
-			local best, bestDist = "Unknown", math.huge
-			for _, t in ipairs(townCache) do
-				local d = (t.x - cx) * (t.x - cx) + (t.y - cy) * (t.y - cy)
-				if d < bestDist then bestDist = d; best = t.name end
+		-- Defer the rest via addEvent so the server can process pending network I/O
+		-- (the C++ discoverSpawnClusters already blocked — give the game loop a breath)
+		local capturedClusters = clusters
+		addEvent(function()
+			local clusters = capturedClusters
+
+			-- Cache towns once
+			local towns = Game.getTowns()
+			local townCache = {}
+			for _, town in ipairs(towns) do
+				local tp = town:getTemplePosition()
+				townCache[#townCache + 1] = { name = town:getName(), x = tp.x, y = tp.y }
 			end
-			return best
-		end
-
-		-- Quality tier based on dominant monster exp
-		local function qualityTier(exp)
-			if exp >= 5000 then return "S"
-			elseif exp >= 2000 then return "A"
-			elseif exp >= 1000 then return "B"
-			else return "C" end
-		end
-
-		-- Process each cluster (no flood-fill — pure data from discoverSpawnClusters)
-		local rows = {}
-		local skippedCount = 0
-		for i, cluster in ipairs(clusters) do
-			local dominant = cluster.monsters and cluster.monsters[1] and cluster.monsters[1].name or nil
-			local domExp = 0
-			if dominant then
-				local mt = MonsterType(dominant)
-				domExp = mt and mt:experience() or 0
+			local function nearestTownCached(cx, cy)
+				local best, bestDist = "Unknown", math.huge
+				for _, t in ipairs(townCache) do
+					local d = (t.x - cx) * (t.x - cx) + (t.y - cy) * (t.y - cy)
+					if d < bestDist then bestDist = d; best = t.name end
+				end
+				return best
 			end
 
-			if (cluster.spawns or 0) < minSpawns or domExp < minExp then
-				skippedCount = skippedCount + 1
-			else
-				local cx = math.floor((cluster.fromPos.x + cluster.toPos.x) / 2)
-				local cy = math.floor((cluster.fromPos.y + cluster.toPos.y) / 2)
-				local cz = cluster.zLevels and cluster.zLevels[1] or cluster.fromPos.z
-				local bboxW = cluster.toPos.x - cluster.fromPos.x + 1
-				local bboxH = cluster.toPos.y - cluster.fromPos.y + 1
-				local town = nearestTownCached(cx, cy)
-				local autoName = dominant
-					and string.format("%s - %s", dominant, town)
-					or string.format("Cave - %s", town)
+			-- Quality tier based on dominant monster exp
+			local function qualityTier(exp)
+				if exp >= 5000 then return "S"
+				elseif exp >= 2000 then return "A"
+				elseif exp >= 1000 then return "B"
+				else return "C" end
+			end
 
-				local zStr = ""
-				if cluster.zLevels then
-					local parts = {}
-					for _, z in ipairs(cluster.zLevels) do parts[#parts + 1] = tostring(z) end
-					zStr = table.concat(parts, ",")
+			-- Process each cluster (no flood-fill — pure data from discoverSpawnClusters)
+			local rows = {}
+			local skippedCount = 0
+			for i, cluster in ipairs(clusters) do
+				local dominant = cluster.monsters and cluster.monsters[1] and cluster.monsters[1].name or nil
+				local domExp = 0
+				if dominant then
+					local mt = MonsterType(dominant)
+					domExp = mt and mt:experience() or 0
 				end
 
-				-- Top-3 monsters for detail line
-				local monParts = {}
-				for j, m in ipairs(cluster.monsters or {}) do
-					if j > 3 then monParts[#monParts + 1] = "..."; break end
-					monParts[#monParts + 1] = string.format("%s(%d)", m.name, m.count)
+				if (cluster.spawns or 0) < minSpawns or domExp < minExp then
+					skippedCount = skippedCount + 1
+				else
+					local cx = math.floor((cluster.fromPos.x + cluster.toPos.x) / 2)
+					local cy = math.floor((cluster.fromPos.y + cluster.toPos.y) / 2)
+					local cz = cluster.zLevels and cluster.zLevels[1] or cluster.fromPos.z
+					local bboxW = cluster.toPos.x - cluster.fromPos.x + 1
+					local bboxH = cluster.toPos.y - cluster.fromPos.y + 1
+					local town = nearestTownCached(cx, cy)
+					local autoName = dominant
+						and string.format("%s - %s", dominant, town)
+						or string.format("Cave - %s", town)
+
+					local zStr = ""
+					if cluster.zLevels then
+						local parts = {}
+						for _, z in ipairs(cluster.zLevels) do parts[#parts + 1] = tostring(z) end
+						zStr = table.concat(parts, ",")
+					end
+
+					-- Top-3 monsters for detail line
+					local monParts = {}
+					for j, m in ipairs(cluster.monsters or {}) do
+						if j > 3 then monParts[#monParts + 1] = "..."; break end
+						monParts[#monParts + 1] = string.format("%s(%d)", m.name, m.count)
+					end
+					local monStr = table.concat(monParts, "; ")
+
+					rows[#rows + 1] = {
+						id = i,
+						name = autoName,
+						spawns = cluster.spawns or 0,
+						domExp = domExp,
+						tier = qualityTier(domExp),
+						zStr = zStr,
+						bboxW = bboxW,
+						bboxH = bboxH,
+						cx = cx, cy = cy, cz = cz,
+						monStr = monStr,
+						numZLevels = cluster.zLevels and #cluster.zLevels or 1,
+					}
 				end
-				local monStr = table.concat(monParts, "; ")
-
-				rows[#rows + 1] = {
-					id = i,
-					name = autoName,
-					spawns = cluster.spawns or 0,
-					domExp = domExp,
-					tier = qualityTier(domExp),
-					zStr = zStr,
-					bboxW = bboxW,
-					bboxH = bboxH,
-					cx = cx, cy = cy, cz = cz,
-					monStr = monStr,
-					numZLevels = cluster.zLevels and #cluster.zLevels or 1,
-				}
 			end
-		end
 
-		-- Sort by dominant exp descending (highest value first)
-		table.sort(rows, function(a, b) return a.domExp > b.domExp end)
+			-- Sort by dominant exp descending (highest value first)
+			table.sort(rows, function(a, b) return a.domExp > b.domExp end)
 
-		-- ── Write formatted text catalog ──────────────────────────────────────
-		local TXT_PATH = "data/hunt_catalog.txt"
-		local CSV_PATH = "data/hunt_catalog.csv"
+			-- ── Write formatted text catalog ──────────────────────────────────────
+			local TXT_PATH = "data/hunt_catalog.txt"
+			local CSV_PATH = "data/hunt_catalog.csv"
 
-		local txtLines = {}
-		txtLines[#txtLines + 1] = string.format(
-			"=== Hunt Catalog | z%d-%d | %d clusters → %d listed (sorted by exp) ===",
-			minZ, maxZ, #clusters, #rows)
-		txtLines[#txtLines + 1] = string.format(
-			"%-5s %-4s %-7s %-6s %-16s %-11s %s",
-			"ID", "Tier", "Spawns", "DomExp", "Z-Levels", "BboxWxH", "Name")
-		txtLines[#txtLines + 1] = string.rep("-", 100)
-
-		local csvLines = {}
-		csvLines[#csvLines + 1] = "id,name,spawns,dominant_exp,tier,z_levels,bbox_w,bbox_h,center_x,center_y,center_z,z_count,monsters"
-
-		for _, row in ipairs(rows) do
-			-- Text: summary line + monster detail line
+			local txtLines = {}
 			txtLines[#txtLines + 1] = string.format(
-				"%-5d %-4s %-7d %-6d %-16s %-11s %s",
-				row.id, row.tier, row.spawns, row.domExp, row.zStr,
-				row.bboxW .. "x" .. row.bboxH, row.name)
+				"=== Hunt Catalog | z%d-%d | %d clusters → %d listed (sorted by exp) ===",
+				minZ, maxZ, #clusters, #rows)
 			txtLines[#txtLines + 1] = string.format(
-				"      center=(%d,%d,%d)  monsters: %s",
-				row.cx, row.cy, row.cz, row.monStr)
+				"%-5s %-4s %-7s %-6s %-16s %-11s %s",
+				"ID", "Tier", "Spawns", "DomExp", "Z-Levels", "BboxWxH", "Name")
+			txtLines[#txtLines + 1] = string.rep("-", 100)
 
-			-- CSV row
-			local csvName = '"' .. row.name:gsub('"', '""') .. '"'
-			local csvMons = '"' .. row.monStr:gsub('"', '""') .. '"'
-			csvLines[#csvLines + 1] = string.format(
-				"%d,%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%s",
-				row.id, csvName, row.spawns, row.domExp, row.tier, row.zStr,
-				row.bboxW, row.bboxH, row.cx, row.cy, row.cz, row.numZLevels, csvMons)
-		end
+			local csvLines = {}
+			csvLines[#csvLines + 1] = "id,name,spawns,dominant_exp,tier,z_levels,bbox_w,bbox_h,center_x,center_y,center_z,z_count,monsters"
 
-		txtLines[#txtLines + 1] = ""
-		txtLines[#txtLines + 1] = string.format(
-			"Skipped: %d (below filters). Total scanned: %d.", skippedCount, #clusters)
-		txtLines[#txtLines + 1] = ""
-		txtLines[#txtLines + 1] = "To flood-fill and save specific clusters:"
-		txtLines[#txtLines + 1] = "  /hunt batch, ids=10 18 63 68, 20/500"
+			for _, row in ipairs(rows) do
+				txtLines[#txtLines + 1] = string.format(
+					"%-5d %-4s %-7d %-6d %-16s %-11s %s",
+					row.id, row.tier, row.spawns, row.domExp, row.zStr,
+					row.bboxW .. "x" .. row.bboxH, row.name)
+				txtLines[#txtLines + 1] = string.format(
+					"      center=(%d,%d,%d)  monsters: %s",
+					row.cx, row.cy, row.cz, row.monStr)
 
-		local f = io.open(TXT_PATH, "w")
-		if f then f:write(table.concat(txtLines, "\n") .. "\n"); f:close() end
+				local csvName = '"' .. row.name:gsub('"', '""') .. '"'
+				local csvMons = '"' .. row.monStr:gsub('"', '""') .. '"'
+				csvLines[#csvLines + 1] = string.format(
+					"%d,%s,%d,%d,%s,%s,%d,%d,%d,%d,%d,%d,%s",
+					row.id, csvName, row.spawns, row.domExp, row.tier, row.zStr,
+					row.bboxW, row.bboxH, row.cx, row.cy, row.cz, row.numZLevels, csvMons)
+			end
 
-		local g = io.open(CSV_PATH, "w")
-		if g then g:write(table.concat(csvLines, "\n") .. "\n"); g:close() end
+			txtLines[#txtLines + 1] = ""
+			txtLines[#txtLines + 1] = string.format(
+				"Skipped: %d (below filters). Total scanned: %d.", skippedCount, #clusters)
+			txtLines[#txtLines + 1] = ""
+			txtLines[#txtLines + 1] = "To flood-fill and save specific clusters:"
+			txtLines[#txtLines + 1] = "  /hunt batch, ids=10 18 63 68, 20/500"
 
-		-- Store in session so /hunt goto <N> works immediately
-		autoNameClusters(clusters)
-		session.discoveries = clusters
+			local f = io.open(TXT_PATH, "w")
+			if f then f:write(table.concat(txtLines, "\n") .. "\n"); f:close() end
 
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
-			"[Hunt] Catalog ready: %d clusters listed (%d skipped). Written to:",
-			#rows, skippedCount))
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.txt  (sorted by exp, human-readable)")
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.csv  (importable into spreadsheet)")
-		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
-			"[Hunt] Pick IDs, then: /hunt batch, ids=3 10 18 63, 20/500")
+			local g = io.open(CSV_PATH, "w")
+			if g then g:write(table.concat(csvLines, "\n") .. "\n"); g:close() end
+
+			-- Store in session so /hunt goto <N> works immediately
+			autoNameClusters(clusters)
+			session.discoveries = clusters
+
+			local summary = string.format(
+				"[Hunt] Catalog ready: %d clusters listed (%d skipped).", #rows, skippedCount)
+			print(summary .. " Files: data/hunt_catalog.txt, data/hunt_catalog.csv")
+
+			local p = Player(playerId)
+			if p then
+				p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, summary .. " Written to:")
+				p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.txt  (sorted by exp, human-readable)")
+				p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  data/hunt_catalog.csv  (importable into spreadsheet)")
+				p:sendTextMessage(MESSAGE_HOTKEY_PRESSED,
+					"[Hunt] Pick IDs, then: /hunt batch, ids=3 10 18 63, 20/500")
+			end
+		end, 100)
 
 	-- =========================================================================
 	-- BATCH: automated scan + accept + save for all qualifying clusters
@@ -1697,6 +1712,334 @@ function huntHelper.onSay(player, words, param)
 		addEvent(batchProcessNext, 3000, state)
 
 	-- =========================================================================
+	-- WIKIMPORT: batch-register hunts from WIKI_HUNTS table
+	-- /hunt wikimport[, dry]
+	-- =========================================================================
+	elseif action == "wikimport" then
+		if not WIKI_HUNTS or #WIKI_HUNTS == 0 then
+			player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[WikiImport] WIKI_HUNTS table not loaded. Export from Hunt Manager first, then /reload scripts.")
+			return true
+		end
+
+		local dryRun = arg:lower():find("dry") ~= nil
+		local playerId = player:getId()
+
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, string.format(
+			"[WikiImport] %d hunts to process%s. Running headlessly — results in data/hunt_wikimport_results.txt.",
+			#WIKI_HUNTS, dryRun and " (DRY RUN)" or ""))
+
+		-- Merge hunts with duplicate seedPos
+		local seedGroups = {}
+		local seedOrder = {}
+		for _, wh in ipairs(WIKI_HUNTS) do
+			local key = wh.seedPos.x .. ":" .. wh.seedPos.y .. ":" .. wh.seedPos.z
+			if not seedGroups[key] then
+				seedGroups[key] = {}
+				seedOrder[#seedOrder + 1] = key
+			end
+			table.insert(seedGroups[key], wh)
+		end
+
+		local mergedHunts = {}
+		for _, key in ipairs(seedOrder) do
+			local group = seedGroups[key]
+			if #group == 1 then
+				mergedHunts[#mergedHunts + 1] = group[1]
+			else
+				-- Merge: combine names, creatures, take highest level
+				local names = {}
+				local creatureSet = {}
+				local creatureList = {}
+				local maxLevel = 0
+				local maxDifficulty = 0
+				local maxExpRating = 0
+				local maxLootRating = 0
+				local allRares = {}
+				local rareSet = {}
+				for _, wh in ipairs(group) do
+					names[#names + 1] = wh.name
+					for _, c in ipairs(wh.creatures or {}) do
+						if not creatureSet[c] then
+							creatureSet[c] = true
+							creatureList[#creatureList + 1] = c
+						end
+					end
+					for _, r in ipairs(wh.rareItems or {}) do
+						if not rareSet[r] then
+							rareSet[r] = true
+							allRares[#allRares + 1] = r
+						end
+					end
+					if (wh.level or 0) > maxLevel then maxLevel = wh.level or 0 end
+					if (wh.difficulty or 0) > maxDifficulty then maxDifficulty = wh.difficulty or 0 end
+					if (wh.expRating or 0) > maxExpRating then maxExpRating = wh.expRating or 0 end
+					if (wh.lootRating or 0) > maxLootRating then maxLootRating = wh.lootRating or 0 end
+				end
+				local mergedName = names[1] .. " (" .. #group .. " sections)"
+				mergedHunts[#mergedHunts + 1] = {
+					name = mergedName,
+					city = group[1].city,
+					level = maxLevel,
+					difficulty = maxDifficulty,
+					expRating = maxExpRating,
+					lootRating = maxLootRating,
+					premium = group[1].premium,
+					seedPos = group[1].seedPos,
+					creatures = creatureList,
+					rareItems = allRares,
+					wikiUrl = group[1].wikiUrl,
+					_merged = names,
+				}
+			end
+		end
+
+		-- State for headless processing
+		local state = {
+			hunts = mergedHunts,
+			index = 1,
+			playerId = playerId,
+			dryRun = dryRun,
+			saved = 0,
+			skipped = 0,
+			warned = 0,
+			failed = 0,
+			skipReasons = {
+				noWalkable = 0,
+				noTiles = 0,
+				noSpawns = 0,
+				tooSmall = 0,
+				writeFailed = 0,
+			},
+			-- Track tile counts to detect duplicate flood-fills
+			tileSignatures = {},
+			logFile = io.open("data/hunt_wikimport_results.txt", "w"),
+		}
+
+		local function wikiLog(s, line)
+			if s.logFile then
+				s.logFile:write(line .. "\n")
+				s.logFile:flush()
+			end
+			local p = Player(s.playerId)
+			if p then
+				p:sendTextMessage(MESSAGE_HOTKEY_PRESSED, line)
+			end
+		end
+
+		local function findNearestWalkable(pos, maxRadius)
+			local tile = Tile(pos)
+			if tile and not tile:hasProperty(CONST_PROP_BLOCKSOLID) then
+				return pos
+			end
+			for r = 1, maxRadius do
+				for dx = -r, r do
+					for dy = -r, r do
+						if math.abs(dx) == r or math.abs(dy) == r then
+							local tryPos = Position(pos.x + dx, pos.y + dy, pos.z)
+							local t = Tile(tryPos)
+							if t and not t:hasProperty(CONST_PROP_BLOCKSOLID) then
+								return tryPos
+							end
+						end
+					end
+				end
+			end
+			return nil
+		end
+
+		local MIN_TILES = 50
+		local MAX_TILES_WARN = 15000
+
+		local function wikiProcessNext(s)
+			if s.index > #s.hunts then
+				-- Summary
+				wikiLog(s, "")
+				wikiLog(s, string.format("[WikiImport] === COMPLETE ==="))
+				wikiLog(s, string.format("[WikiImport] Total: %d | Saved: %d | Skipped: %d | Warned: %d | Failed: %d",
+					#s.hunts, s.saved, s.skipped, s.warned, s.failed))
+				for reason, count in pairs(s.skipReasons) do
+					if count > 0 then
+						wikiLog(s, string.format("  %s: %d", reason, count))
+					end
+				end
+				if s.logFile then s.logFile:close() end
+				return
+			end
+
+			local wh = s.hunts[s.index]
+			local i = s.index
+			s.index = s.index + 1
+
+			wikiLog(s, string.format("[WikiImport] [%d/%d] %s — seed %s",
+				i, #s.hunts, wh.name, fmtPos(wh.seedPos)))
+
+			-- Find nearest walkable tile (radius 30)
+			local walkableSeed = findNearestWalkable(wh.seedPos, 30)
+			if not walkableSeed then
+				wikiLog(s, string.format("  SKIP: no walkable tile within 30 of seed"))
+				s.skipped = s.skipped + 1
+				s.skipReasons.noWalkable = s.skipReasons.noWalkable + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			if walkableSeed.x ~= wh.seedPos.x or walkableSeed.y ~= wh.seedPos.y or walkableSeed.z ~= wh.seedPos.z then
+				wikiLog(s, string.format("  Seed adjusted: %s -> %s", fmtPos(wh.seedPos), fmtPos(walkableSeed)))
+			end
+
+			-- Flood-fill
+			local tempZoneName = "__wikimport_temp_" .. i
+			local zone = Zone(tempZoneName)
+			local maxTiles = 5000
+			local maxDistance = 300
+			local result = zone:buildFromFloodFill(walkableSeed, maxTiles, maxDistance)
+
+			if not result or result.tiles == 0 then
+				wikiLog(s, string.format("  SKIP: flood-fill found 0 tiles"))
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.noTiles = s.skipReasons.noTiles + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			-- Expansion loop (follow teleports + floor changes)
+			expandZoneConnections(zone, maxTiles)
+
+			-- Compute stats and classify teleports
+			local stats = computeZoneStats(zone)
+			if not stats then
+				wikiLog(s, string.format("  SKIP: zone empty after expansion"))
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.noTiles = s.skipReasons.noTiles + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			-- Z-levels (stats.zLevels is already a sorted list)
+			local zStr = ""
+			for _, z in ipairs(stats.zLevels or {}) do
+				zStr = zStr .. (zStr == "" and "" or ",") .. tostring(z)
+			end
+
+			local bboxFrom = Position(stats.bboxMin.x, stats.bboxMin.y, stats.bboxMin.z)
+			local bboxTo = Position(stats.bboxMax.x, stats.bboxMax.y, stats.bboxMax.z)
+			local teleportEntries, exitTeleports, internalTeleports = classifyZoneTeleports(zone, bboxFrom, bboxTo)
+
+			-- Detect exit
+			local exitPos = nil
+			local exitIsBestGuess = false
+			if #exitTeleports > 0 then
+				exitPos = Position(exitTeleports[1].dest.x, exitTeleports[1].dest.y, exitTeleports[1].dest.z)
+			elseif result.entries and #result.entries > 0 then
+				local bestEntry = result.entries[1]
+				for _, ep in ipairs(result.entries) do
+					if ep.z < bestEntry.z then bestEntry = ep end
+				end
+				exitPos = Position(bestEntry.x, bestEntry.y, bestEntry.z)
+			elseif #teleportEntries > 0 then
+				exitPos = Position(teleportEntries[1].source.x, teleportEntries[1].source.y, teleportEntries[1].source.z)
+			else
+				exitPos = walkableSeed
+				exitIsBestGuess = true
+			end
+
+			-- Collect warnings
+			local warnings = {}
+
+			-- Skip: too small (< MIN_TILES)
+			if stats.tiles < MIN_TILES then
+				wikiLog(s, string.format("  %d tiles, z=[%s], %d spawns — SKIP: too small (< %d tiles)",
+					stats.tiles, zStr, stats.spawns, MIN_TILES))
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.tooSmall = s.skipReasons.tooSmall + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			-- Skip: no spawns
+			if stats.spawns == 0 then
+				wikiLog(s, string.format("  %d tiles, z=[%s], 0 spawns — SKIP: no spawns",
+					stats.tiles, zStr))
+				Zone.removeByName(tempZoneName)
+				s.skipped = s.skipped + 1
+				s.skipReasons.noSpawns = s.skipReasons.noSpawns + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			-- Warn: mega-merge (too many tiles)
+			if stats.tiles >= MAX_TILES_WARN then
+				warnings[#warnings + 1] = string.format("WARN: mega-merge? %d tiles (cap is %d)", stats.tiles, maxTiles)
+			end
+
+			-- Warn: possible duplicate flood-fill
+			local tileSig = string.format("%d_%d", stats.tiles, stats.spawns)
+			if s.tileSignatures[tileSig] then
+				warnings[#warnings + 1] = string.format("WARN: same tile/spawn count as #%s — possible overlap",
+					s.tileSignatures[tileSig])
+			end
+			s.tileSignatures[tileSig] = wh.name
+
+			wikiLog(s, string.format("  %d tiles, z=[%s], %d spawns, %d entries, %d exits%s",
+				stats.tiles, zStr, stats.spawns, #teleportEntries, #exitTeleports,
+				exitIsBestGuess and " (exit=best-guess)" or ""))
+
+			for _, w in ipairs(warnings) do
+				wikiLog(s, string.format("  %s", w))
+				s.warned = s.warned + 1
+			end
+
+			-- Clean up temp zone
+			Zone.removeByName(tempZoneName)
+
+			if s.dryRun then
+				wikiLog(s, string.format("  DRY: would save %s", wh.name))
+				s.saved = s.saved + 1
+				addEvent(wikiProcessNext, 100, s)
+				return
+			end
+
+			-- Generate config file
+			local batchSession = {
+				name = wh.name,
+				caveSeed = walkableSeed,
+				exitPos = exitPos,
+				exitIsBestGuess = exitIsBestGuess,
+				teleportEntries = teleportEntries,
+				exitTeleports = exitTeleports,
+				internalTeleports = internalTeleports,
+			}
+			local config = generateConfig(batchSession)
+			local header = string.format(
+				"-- Hunt: %s\n-- Generated by /hunt wikimport (wiki seed %s)\n-- Level: %d | City: %s\n\n",
+				wh.name, fmtPos(wh.seedPos), wh.level or 0, wh.city or "")
+			local content = header .. config .. "\n"
+
+			local filepath = "data/scripts/movements/hunt_" .. sanitizeFilename(wh.name) .. ".lua"
+			local file = io.open(filepath, "w")
+			if file then
+				file:write(content)
+				file:close()
+				wikiLog(s, string.format("  SAVED: %s", filepath))
+				s.saved = s.saved + 1
+			else
+				wikiLog(s, string.format("  FAILED: could not write %s", filepath))
+				s.failed = s.failed + 1
+				s.skipReasons.writeFailed = s.skipReasons.writeFailed + 1
+			end
+
+			addEvent(wikiProcessNext, 2000, s)
+		end
+
+		wikiLog(state, string.format("[WikiImport] Starting %s— %d hunts (%d merged from %d originals)",
+			dryRun and "DRY RUN " or "", #mergedHunts,
+			#WIKI_HUNTS - #mergedHunts, #WIKI_HUNTS))
+		addEvent(wikiProcessNext, 1000, state)
+
+	-- =========================================================================
 	-- HELP
 	-- =========================================================================
 	else
@@ -1710,6 +2053,7 @@ function huntHelper.onSay(player, words, param)
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Commands: (bulk - recommended workflow)")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt catalog[, zN-M][, expN][, minS]   fast catalog, no flood-fill")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt batch[, dry][, ids=3 10 18][, N/T][, zN-M][, expN][, requireexit]")
+		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt wikimport[, dry]       import from WIKI_HUNTS table")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "[Hunt] Commands: (editing)")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt name, <name>          set hunt name")
 		player:sendTextMessage(MESSAGE_HOTKEY_PRESSED, "  /hunt exit                  set exit position")
